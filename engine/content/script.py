@@ -155,12 +155,85 @@ class ScriptGenerator:
                 script = build_template_script(
                     idea, profile, duration, language, structure, target_words)
 
+        # Enforce the word FLOOR, not only the ceiling.
+        #
+        # `min_words` was computed here from the start, threaded through two
+        # signatures, and never actually checked - so only overlong scripts
+        # were corrected. A real Groq response came back with 28 words against
+        # an 87-word target: valid JSON, decent prose, and 14 seconds of
+        # narration for a 45-second video. The speaking-rate clamp bottoms out
+        # at -28%, so nothing downstream could rescue it, and it would have
+        # failed the duration check only after a full render.
+        script = self._ensure_minimum_length(
+            script, idea, profile, duration, language, is_short, target_words,
+            min_words, scene_count, structure, research_context, strategy_hints)
+
         script = self._post_process(script, profile, target_words, min_words,
                                     duration, is_short)
         log_event("SCRIPT", "script generated", provider=script.provider,
                   words=count_words(script.script), scenes=len(script.scenes),
                   target_words=target_words,
                   est_seconds=f"{script.estimated_duration:.1f}")
+        return script
+
+    # ------------------------------------------------------------------
+    def _ensure_minimum_length(self, script: Script, idea: ContentIdea,
+                               profile: NicheProfile, duration: int,
+                               language: str, is_short: bool,
+                               target_words: int, min_words: int,
+                               scene_count: int,
+                               structure: list[tuple[str, str, float]],
+                               research_context: str,
+                               strategy_hints: str) -> Script:
+        """Re-ask once when the model under-delivered, then fall back.
+
+        Order matters: a short script from a good model is worth one corrective
+        retry, because the prose is usually fine and only the length is wrong.
+        If the retry is still short we take the template builder instead - it is
+        formulaic, but it fills the budget, and it is labelled `template` so the
+        quality gate penalises it and nothing pretends otherwise. A 45-second
+        video that runs 20 seconds is a failed video regardless of how well the
+        sentences read.
+        """
+        got = count_words(script.script)
+        if got >= min_words or script.provider == "template":
+            return script
+
+        log_event("SCRIPT", "script under the word floor, re-asking",
+                  words=got, floor=min_words, target=target_words,
+                  provider=script.provider)
+        nudge = (
+            f"\n\nYOUR PREVIOUS ATTEMPT WAS TOO SHORT: {got} words against a "
+            f"{target_words}-word requirement. That is {got / max(duration, 1):.1f} "
+            f"words per second for a {duration}-second video, which does not "
+            f"fill it. Write the FULL {target_words} words this time, across "
+            f"{scene_count} scenes. Add substance - more specifics, more "
+            f"consequence - not filler or repetition.")
+        try:
+            data, provider = self.router.complete_json(
+                self._build_prompt(idea, profile, duration, language, is_short,
+                                   target_words, scene_count, structure,
+                                   research_context, strategy_hints) + nudge,
+                system=SYSTEM_PROMPT, temperature=self.temperature,
+                max_tokens=4096 if is_short else 8192)
+            retried = self._parse(data, idea, profile, language, provider)
+        except LLMError as exc:
+            log_event("SCRIPT", "re-ask failed", error=str(exc)[:160])
+            retried = None
+
+        if retried is not None and count_words(retried.script) > got:
+            script = retried
+            got = count_words(script.script)
+            log_event("SCRIPT", "re-ask improved the length", words=got,
+                      floor=min_words)
+
+        if got < min_words:
+            log_event("SCRIPT", "still under the floor, using the template "
+                                "builder for correct duration",
+                      words=got, floor=min_words,
+                      note="formulaic but the right length; recorded as template")
+            script = build_template_script(
+                idea, profile, duration, language, structure, target_words)
         return script
 
     # ------------------------------------------------------------------

@@ -782,6 +782,68 @@ class TestTransientRetry:
         assert flaky.calls == 3
         assert Weaker.used is False
 
+    @pytest.mark.parametrize("message,retry,expected", [
+        ("timed out", True, True),                       # hosted: a blip
+        ("timed out", False, False),                     # local: our own budget
+        ("httpx.ReadTimeout", False, False),
+        ("gemini 504: deadline exceeded", False, True),   # far end gave up
+        ("groq rate limit reached (free tier)", False, True),
+        ("gemini 503: overloaded", False, True),
+    ])
+    def test_timeouts_are_only_retried_where_that_helps(self, message, retry,
+                                                        expected):
+        """A timeout means two different things.
+
+        From a hosted provider it is usually a network blip. From a LOCAL model
+        it means the request did not fit the time budget we chose, and the
+        identical request will not fit next time either. Observed: with both
+        hosted providers rate-limited the chain fell through to CPU-only
+        ollama, timed out after 300s, and was retried on the same 300s budget -
+        ten minutes burned to land in the same place.
+        """
+        assert _is_transient_llm(message, retry_timeouts=retry) is expected
+
+    def test_ollama_declares_its_timeouts_unretryable(self):
+        from engine.content.llm import GroqProvider, OllamaProvider
+        assert OllamaProvider.retry_timeouts is False
+        assert getattr(GroqProvider, "retry_timeouts", True) is True
+
+    def test_the_router_honours_the_provider_flag(self):
+        from engine.content.llm import LLMRouter
+
+        router = LLMRouter([], cfg=None)
+        router.retry_backoff = 0.0
+
+        class SlowLocal:
+            name = "slowlocal"
+            retry_timeouts = False
+
+            def __init__(self):
+                self.calls = 0
+
+            def available(self):
+                return True
+
+            def complete(self, prompt, **kw):
+                self.calls += 1
+                raise LLMError("timed out")
+
+        class Fallback:
+            name = "fallback"
+
+            def available(self):
+                return True
+
+            def complete(self, prompt, **kw):
+                from engine.content.llm import LLMResult
+                return LLMResult(text="ok", provider=self.name, model="m")
+
+        slow = SlowLocal()
+        router.providers = [slow, Fallback()]
+        assert router.complete("hi").provider == "fallback"
+        assert slow.calls == 1, (
+            f"{slow.calls} attempts - a local timeout must not be retried")
+
     def test_a_permanent_failure_moves_on_immediately(self):
         from engine.content.llm import LLMRouter, LLMResult
 
@@ -1001,3 +1063,131 @@ class TestTokenStorePermissions:
         subprocess.run(["icacls", str(target), "/reset"],
                        capture_output=True, timeout=30, check=False)
         assert readable is False,             "name-based grant now works; the SID approach is still safer"
+
+
+# ==========================================================================
+# The word floor
+# ==========================================================================
+class TestWordFloor:
+    """`min_words` was computed, passed through two signatures, and never used.
+
+    Only overlong scripts were corrected. A real Groq response came back with
+    28 words against an 87-word target: valid JSON, decent prose, 14 seconds of
+    narration for a 45-second video. The speaking-rate clamp bottoms out around
+    -28%, so nothing downstream could rescue it, and it would have failed the
+    duration check only after a full render.
+    """
+
+    class ShortRouter:
+        """Returns a too-short script; optionally complies on the retry."""
+
+        def __init__(self, words: int = 28, comply_on_retry: bool = False,
+                     full_words: int = 100):
+            self.words = words
+            self.comply_on_retry = comply_on_retry
+            self.full_words = full_words
+            self.calls = 0
+            self.saw_nudge = False
+
+        def complete_json(self, prompt, *, system="", temperature=0.8,
+                          max_tokens=4096, attempts=2):
+            self.calls += 1
+            if "TOO SHORT" in prompt:
+                self.saw_nudge = True
+                n = self.full_words if self.comply_on_retry else self.words
+            else:
+                n = self.words
+            per = max(1, n // 4)
+            return {
+                "title_ideas": ["A Specific Title"],
+                "hook": "The number everyone quotes was withdrawn.",
+                "voice_style": "serious",
+                "cta": "Check the source.",
+                "scenes": [
+                    {"role": "value",
+                     "narration": " ".join(f"w{i}x{k}" for k in range(per)) + ".",
+                     "visual_prompt": f"a photograph {i}",
+                     "visual_keywords": ["thing"], "on_screen_text": ""}
+                    for i in range(4)
+                ],
+                "claims": [], "sources": [],
+            }, "fakeprovider"
+
+    def _run(self, cfg, router):
+        gen = ScriptGenerator(cfg, router=router)
+        return gen.generate(make_idea(),
+                            build_profile("science", duration_seconds=45),
+                            duration=45, video_format="SHORT")
+
+    def test_a_short_script_triggers_a_corrective_retry(self, cfg):
+        router = self.ShortRouter(words=28)
+        self._run(cfg, router)
+        assert router.saw_nudge is True, "the model was never told it was short"
+        assert router.calls == 2, f"{router.calls} calls; expected one retry"
+
+    def test_a_complying_retry_is_kept(self, cfg):
+        router = self.ShortRouter(words=28, comply_on_retry=True, full_words=110)
+        script = self._run(cfg, router)
+        assert script.provider == "fakeprovider",             "a good retry must be used, not discarded for the template"
+        assert count_words(script.script) >= 90
+
+    def test_a_still_short_retry_falls_back_to_the_template(self, cfg):
+        """Formulaic-but-correct-length beats eloquent-but-half-empty."""
+        router = self.ShortRouter(words=28, comply_on_retry=False)
+        script = self._run(cfg, router)
+        assert script.provider == "template"
+        # The template builder fills toward the budget.
+        assert count_words(script.script) >= 80, count_words(script.script)
+
+    def test_the_result_can_actually_hit_the_target_duration(self, cfg):
+        """The point of the floor: a 45s request must not become a 14s video."""
+        router = self.ShortRouter(words=28)
+        script = self._run(cfg, router)
+        profile = build_profile("science", duration_seconds=45)
+        seconds = count_words(script.script) / profile.words_per_second
+        assert seconds >= 45 * 0.72, (
+            f"{seconds:.1f}s of narration for a 45s video is unrecoverable - "
+            f"the speaking-rate clamp cannot stretch that far")
+
+    def test_an_adequate_script_is_left_alone(self, cfg):
+        router = self.ShortRouter(words=120)
+        script = self._run(cfg, router)
+        assert router.calls == 1, "no retry needed"
+        assert router.saw_nudge is False
+        assert script.provider == "fakeprovider"
+
+    def test_the_template_builder_is_not_re_asked(self, cfg):
+        """It already fills the budget; re-asking it would loop pointlessly."""
+        class DeadRouter:
+            calls = 0
+
+            def complete_json(self, prompt, **kw):
+                DeadRouter.calls += 1
+                raise LLMError("no provider")
+
+        script = self._run(cfg, DeadRouter())
+        assert script.provider == "template"
+        assert DeadRouter.calls == 1, "the floor check must not re-ask on template"
+
+
+# ==========================================================================
+# The duration check must block
+# ==========================================================================
+class TestDurationBlocks:
+    def test_duration_correct_is_a_blocking_check(self):
+        """A real run produced 25.86s for a 45s request - 43% off against a
+        25% tolerance - and still scored 95/100 and passed. Handing that to
+        the user as a "45 second video" is the gate failing at its one job."""
+        from engine.quality.gate import CHECKS
+        check = next(c for c in CHECKS if c.name == "duration_correct")
+        assert check.blocking is True
+
+    def test_the_other_measurable_failures_still_block(self):
+        """Guard against someone relaxing these while tuning."""
+        from engine.quality.gate import CHECKS
+        must_block = {"file_exists", "playable", "resolution", "audio_present",
+                      "audio_not_silent", "duration_correct", "originality",
+                      "policy_risk", "kids_compliance", "encoding_compatible",
+                      "title_present"}
+        blocking = {c.name for c in CHECKS if c.blocking}
+        assert must_block <= blocking, must_block - blocking

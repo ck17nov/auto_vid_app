@@ -23,6 +23,20 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+# Force UTF-8 on stdout/stderr before anything prints.
+#
+# The Windows console defaults to cp1252, and real YouTube titles are full of
+# emoji. `research --niche space` fetched a genuine video titled with a skull
+# emoji and the CLI died on UnicodeEncodeError - not in the API call, but in
+# print(). Every command that displays researched titles, ideas or log lines
+# was affected. errors="replace" is deliberate: a title rendering as `??` is a
+# cosmetic problem, a crash is not.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+    except (AttributeError, ValueError, OSError):
+        pass                    # redirected to something that cannot be changed
+
 # Allow `python backend/cli.py` as well as `python -m backend.cli`.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 

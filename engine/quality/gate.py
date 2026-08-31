@@ -38,7 +38,12 @@ CHECKS: list[Check] = [
     Check("audio_not_silent", 8.0, blocking=True),
     Check("audio_loudness", 5.0),
     Check("no_long_silence", 6.0),
-    Check("duration_correct", 7.0),
+    # Blocking. It used to be advisory, and a real run produced a 25.86s video
+    # for a 45s request - 43% off against a 25% tolerance - which still scored
+    # 95/100 and passed. Presenting that for approval as a "45 second video" is
+    # the gate failing at its one job. The tolerance is already generous; going
+    # outside it means the video is not the thing that was asked for.
+    Check("duration_correct", 7.0, blocking=True),
     Check("subtitles_present", 5.0),
     Check("subtitles_aligned", 5.0),
     Check("thumbnail_present", 4.0),

@@ -131,11 +131,28 @@ _TRANSIENT_LLM = re.compile(
     r"unavailable|timed? ?out|timeout|temporarily|try again)", re.I)
 
 
-def _is_transient_llm(message: str) -> bool:
+_TIMEOUT = re.compile(r"(timed? ?out|timeout|deadline exceeded)", re.I)
+
+
+def _is_transient_llm(message: str, *, retry_timeouts: bool = True) -> bool:
+    """True if waiting could plausibly fix it.
+
+    `retry_timeouts` exists because a timeout means two different things. From
+    a hosted provider it is usually a network blip worth one more attempt. From
+    a LOCAL model it means the request did not fit the time budget we chose,
+    and the identical request will not fit next time either.
+
+    Observed with both hosted providers rate-limited: the chain fell through to
+    CPU-only ollama, timed out after 300s, and was then retried on the same
+    300s budget. Ten minutes burned to arrive in the same place.
+    """
     if re.search(r"\b(401|403)\b|invalid api key|permission denied", message, re.I):
         return False
     if _is_model_retired(message):
         return False
+    if not retry_timeouts and _TIMEOUT.search(message):
+        # A 504 is the far end giving up, not our budget being too small.
+        return bool(re.search(r"\b504\b", message))
     return bool(_TRANSIENT_LLM.search(message))
 
 
@@ -346,6 +363,9 @@ class OllamaProvider:
     """
 
     name = "ollama"
+    # A timeout here is our own budget expiring, not a blip. Retrying it costs
+    # another full timeout and lands in exactly the same place.
+    retry_timeouts = False
 
     # 900s was the original default and it made the pipeline indistinguishable
     # from a hang: a CPU-only 7B model can sit there for a quarter of an hour
@@ -519,7 +539,9 @@ class LLMRouter:
                     temperature=temperature, max_tokens=max_tokens)
             except Exception as exc:
                 last = exc
-                if attempt >= attempts or not _is_transient_llm(str(exc)):
+                retry_timeouts = getattr(provider, "retry_timeouts", True)
+                if attempt >= attempts or not _is_transient_llm(
+                        str(exc), retry_timeouts=retry_timeouts):
                     raise
                 log_event("LLM", "transient, waiting rather than downgrading",
                           provider=provider.name, attempt=f"{attempt}/{attempts}",

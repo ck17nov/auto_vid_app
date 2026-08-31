@@ -60,7 +60,13 @@ content:
   # token headroom (~1,500 requests/day, high TPM), which matters more than
   # per-call latency when a job makes four to six calls back to back.
   # Swap them back if you upgrade to a paid Groq tier.
-  llm_provider_order: [gemini, groq, ollama, template]
+  # `ollama` is deliberately NOT in this list. Removing OLLAMA_HOST from .env
+  # does not disable it - the provider defaults to http://127.0.0.1:11434 and
+  # reports itself available whenever the daemon is running, so the ORDER is
+  # the only real off switch. On a CPU-only host it costs 300s per call and
+  # then times out, which is worse than the template builder. Add it back if
+  # you have a GPU, or if you lose both hosted keys and want a local fallback.
+  llm_provider_order: [gemini, groq, template]
   temperature: 0.85
   max_ideas: 10
   # One scene = one visual = one TTS call, so this bounds the cost of a single
