@@ -26,8 +26,15 @@ long-form video took 64 minutes. On 2 Ampere cores, expect meaningfully worse:
 
 | Video | Laptop (4 cores) | Expect on 2 OCPU |
 |---|---|---|
-| 45 s Short | ~7 min | ~15-25 min |
+| 45 s Short, stills | ~7 min | ~15-25 min |
+| 45 s Short, **stock footage** | ~15 min | **~30-45 min** |
 | 4 min long-form | ~64 min | **2-3 hours** |
+
+Stock footage roughly doubles render time against stills - each scene is a
+decode as well as an encode, instead of a single JPEG panned by zoompan. It
+looks markedly better and it is the default when a Pexels key is set; if the
+Oracle box is too slow for you, dropping `pexels_video` from
+`visuals.provider_order` gets the old speed back.
 
 Shorts are comfortable. Long-form is an overnight job. If long-form daily is
 your plan, this free tier is not the right home for it, and I would rather tell
