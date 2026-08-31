@@ -104,6 +104,12 @@ tts:
     te: te-IN-ShrutiNeural
     es: es-ES-ElviraNeural
   rate: "+8%"
+  # Bounds for the automatic duration re-fit. The old limits allowed +42% and a
+  # real run shipped at +35%, which sounds rushed. Beyond these the script is
+  # the wrong length and the (blocking) duration check should say so, rather
+  # than the delivery papering over it.
+  rate_floor: 0.88
+  rate_ceiling: 1.16
   pitch: "+0Hz"
   target_lufs: -14.0
 
@@ -152,6 +158,10 @@ video:
   # x264 encodes there are slower than two.
   render_parallel: 0
   kenburns: true
+  # Set either to false for voice-only audio. The synthesised bed is a taste
+  # call, not a requirement.
+  music_enabled: true
+  sfx_enabled: true
   hardware_accel: auto           # auto | none | nvenc | qsv | amf
   # Named style template (spec section 45). Leave empty to auto-select from
   # the niche + style text. One of: FAST_FACTS, TECH_NEWS,

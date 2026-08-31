@@ -198,7 +198,7 @@ Verified on this machine (Windows 11, Python 3.12, FFmpeg 9.0, JDK 17, Android S
 | Area | State |
 |---|---|
 | Engine: research -> script -> voice -> visuals -> render -> quality | Run end-to-end on Shorts and on a 4-minute long-form video, every artifact verified |
-| Python test suite | **413 tests passing** |
+| Python test suite | **419 tests passing** |
 | Static analysis | pyflakes clean (bar 3 documented import-probes) |
 | Backend API + CLI | 18 endpoints, `doctor` / `run` / `research` / `quota` exercised |
 | Android app | **Compiles and packages: 24.0 MB debug APK** (`com.autotube.ai.debug`, minSdk 26, targetSdk 35) |

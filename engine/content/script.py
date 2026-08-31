@@ -693,7 +693,12 @@ Return this exact JSON shape:
         # so trimming is cheap - and leaving it to the speaking rate is not:
         # a 17% word overrun measured here forced a +31% delivery rate, which
         # sounds rushed. Trim first, let the rate make the fine correction.
-        trigger, ceiling = (1.28, 1.12) if is_short else (1.08, 1.02)
+        # The Shorts trigger was 1.28. Whatever it lets through has to be
+        # absorbed by the speaking rate, and a measured 25% overrun produced a
+        # +35% delivery - which a listener correctly described as "the voice
+        # feels a little faster". Trim close to budget; let the rate make only
+        # a small correction.
+        trigger, ceiling = (1.10, 1.03) if is_short else (1.08, 1.02)
         words_total = sum(count_words(s.narration) for s in scenes)
         if words_total > target_words * trigger and len(scenes) > 3:
             scenes = _trim_to_budget(scenes, int(target_words * ceiling))

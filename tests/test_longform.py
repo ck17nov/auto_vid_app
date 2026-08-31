@@ -1351,3 +1351,99 @@ class TestSpeechRateMeasuresSpeechNotSilence:
         assert good > biased, "the gap-inclusive measurement must read slower"
         assert good / biased > 1.05, (
             f"{good:.2f} vs {biased:.2f} - the bias should be several percent")
+
+
+# ==========================================================================
+# Delivery: the voice must not be sped up to cover a long script
+# ==========================================================================
+class TestNaturalDelivery:
+    """A shipped Short was synthesised at +35% and sounded rushed.
+
+    The script came in at 56.2s of narration against a 45s target, the Shorts
+    trim threshold (1.28) let a 25% overrun through, and the rate clamp allowed
+    up to +42% - so the delivery absorbed the whole error.
+    """
+
+    def test_the_rate_clamp_stays_in_natural_range(self, cfg):
+        floor = float(cfg.get("tts.rate_floor", 0.88))
+        ceiling = float(cfg.get("tts.rate_ceiling", 1.16))
+        assert 0.80 <= floor < 1.0
+        assert 1.0 < ceiling <= 1.20, f"+{(ceiling - 1) * 100:.0f}% is rushed"
+
+    def test_the_shorts_trim_leaves_only_a_small_correction(self, cfg):
+        """Whatever the trim lets through, the rate has to absorb."""
+        router = FakeRouter(overrun=1.25)
+        gen = ScriptGenerator(cfg, router=router)
+        duration = 45
+        script = gen.generate(make_idea(),
+                              build_profile("science", duration_seconds=duration),
+                              duration=duration, video_format="SHORT")
+        profile = build_profile("science", duration_seconds=duration)
+        target = duration * profile.words_per_second
+        overrun = count_words(script.script) / target
+        ceiling = float(cfg.get("tts.rate_ceiling", 1.16))
+        assert overrun <= ceiling, (
+            f"script is {overrun:.2f}x target but the rate can only stretch to "
+            f"{ceiling:.2f}x - the excess would be absorbed by speaking faster")
+
+    def test_music_and_sfx_can_be_switched_off(self, cfg):
+        """Voice-only is a legitimate choice, and the fastest fix if the bed
+        bothers you."""
+        assert cfg.get("video.music_enabled") is True
+        assert cfg.get("video.sfx_enabled") is True
+        cfg.set("video.music_enabled", False)
+        assert cfg.get("video.music_enabled") is False
+        cfg.set("video.music_enabled", True)
+
+
+class TestMusicBedIsNotAToneGenerator:
+    """Four sustained pure sines with tremolo is a test tone, and was reported
+    as "a little beep" over the audio. The bed is now noise-led with tonal
+    colour sitting well back."""
+
+    @staticmethod
+    def _code(func) -> str:
+        """Source with comments stripped.
+
+        The comments in synth_bed quote the old `sine=frequency=f` to explain
+        the bug, so a naive substring search matches the explanation rather
+        than the code.
+        """
+        import inspect
+        return "\n".join(
+            line for line in inspect.getsource(func).splitlines()
+            if not line.lstrip().startswith("#"))
+
+    def test_the_oscillators_have_harmonics(self):
+        from engine.video import music
+        code = self._code(music.synth_bed)
+        assert "aevalsrc" in code, "still using bare sine oscillators"
+        assert "sine=frequency" not in code, "a bare sine is a test tone"
+
+    def test_the_chord_sits_below_the_noise_body(self):
+        """If the tonal layer is loudest it reads as a tone regardless of how
+        many harmonics each voice has."""
+        from engine.video import music
+        code = self._code(music.synth_bed)
+        assert "voice_gain = -11.0" in code, \
+            "the chord must sit back; leading with pitch is what beeped"
+        assert "[rumble]" in code, "the noise body should be layered"
+
+    def test_the_bed_is_measurably_less_tonal(self, tmp_path):
+        """Objective check: energy concentrated in a few bins is what a
+        listener hears as a beep. Measured 28.5% before the fix, 13.2% after."""
+        import wave
+
+        import numpy as np
+
+        from engine.video.music import synth_bed
+
+        out = synth_bed(10.0, tmp_path / "bed.wav", mood="tension", seed="t")
+        with wave.open(str(out)) as w:
+            raw = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
+        mono = raw.reshape(-1, 2).mean(axis=1).astype(np.float64)
+        seg = mono[48000 * 3:48000 * 8]
+        spec = np.abs(np.fft.rfft(seg * np.hanning(len(seg)))) + 1e-12
+        concentration = float(np.sort(spec)[-8:].sum() / spec.sum())
+        assert concentration < 0.20, (
+            f"{concentration * 100:.1f}% of energy in 8 bins - that is a tone")

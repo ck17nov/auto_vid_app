@@ -420,7 +420,20 @@ class Pipeline:
             # Correct the speaking rate rather than shipping a mistimed video.
             # edge-tts rate is a percentage delta on the base speed.
             base = _parse_rate(spec.rate)
-            needed = clamp((1.0 + base / 100.0) * (total / target), 0.72, 1.42)
+            # Clamped to what still sounds like a person talking. The old
+            # bounds allowed +42%, and a real run shipped at +35% - measurably
+            # rushed. If the correction needed is larger than this the script
+            # is the wrong length, and the duration check (now blocking) should
+            # catch it rather than the delivery hiding it.
+            lo = float(self.cfg.get("tts.rate_floor", 0.88))
+            hi = float(self.cfg.get("tts.rate_ceiling", 1.16))
+            wanted = (1.0 + base / 100.0) * (total / target)
+            needed = clamp(wanted, lo, hi)
+            if abs(wanted - needed) > 0.01:
+                log_event("TTS", "rate correction clamped to stay natural",
+                          wanted=f"{(wanted - 1) * 100:+.0f}%",
+                          using=f"{(needed - 1) * 100:+.0f}%",
+                          note="script length is the real problem here")
             new_rate = f"{(needed - 1.0) * 100:+.0f}%"
             log_event("TTS", "re-fitting narration to target duration",
                       measured=f"{total:.1f}s", target=f"{target:.0f}s",
@@ -485,16 +498,25 @@ class Pipeline:
         job.subtitle_path = str(srt_path)
 
         # ---- music + sfx ------------------------------------------------
+        # Both are switchable. A synthesised bed is a taste call, not a
+        # requirement: plenty of good Shorts have voice only, and if the pad
+        # bothers you, turning it off is a better answer than fighting it.
         boundaries = [off for off, _ in offsets][1:]
-        music_path, music_src = self._retry("music", lambda: build_music(
-            total, job_dir / "music.wav", mood_text=profile.music_mood,
-            seed=job.job_id), job)
+        music_path, music_src = None, "none"
+        if bool(self.cfg.get("video.music_enabled", True)):
+            music_path, music_src = self._retry("music", lambda: build_music(
+                total, job_dir / "music.wav", mood_text=profile.music_mood,
+                seed=job.job_id), job)
+        else:
+            log_event("MUSIC", "music disabled in config")
+
         sfx_path = None
-        try:
-            sfx_path = build_transition_sfx(boundaries, total,
-                                            job_dir / "sfx.wav", seed=job.job_id)
-        except Exception as exc:
-            log_event("MUSIC", "SFX skipped", error=str(exc)[:140])
+        if bool(self.cfg.get("video.sfx_enabled", True)):
+            try:
+                sfx_path = build_transition_sfx(
+                    boundaries, total, job_dir / "sfx.wav", seed=job.job_id)
+            except Exception as exc:
+                log_event("MUSIC", "SFX skipped", error=str(exc)[:140])
 
         # ---- master mix -------------------------------------------------
         master, audio_stats = self._retry("audio", lambda: self.composer.mix_audio(

@@ -106,27 +106,53 @@ def synth_bed(duration: float, out_path: Path, *, mood: str = "cinematic",
     inputs: list[str] = []
     chains: list[str] = []
     for i, f in enumerate(freqs):
+        # Harmonics, not a bare sine.
+        #
+        # This used `sine=frequency=f`, and four sustained pure tones with
+        # tremolo is the exact character of a test tone - reported as "a little
+        # beep over the audio", which is a fair description of what it was.
+        # Real instruments have overtones, so each voice is now a fundamental
+        # plus a 2nd and 3rd harmonic at falling amplitude, with the partials
+        # detuned a few cents so they beat gently against each other instead of
+        # phase-locking into one hard tone. The lowpass below still tames the
+        # top end, but there is now something for it to shape.
+        h2 = f * 2.0 * rng.uniform(0.9985, 1.0015)
+        h3 = f * 3.0 * rng.uniform(0.997, 1.003)
+        wave = (f"0.55*sin(2*PI*{f:.3f}*t)"
+                f"+0.22*sin(2*PI*{h2:.3f}*t)"
+                f"+0.09*sin(2*PI*{h3:.3f}*t)")
         inputs += ["-f", "lavfi", "-i",
-                   f"sine=frequency={f:.3f}:duration={dur:.2f}:sample_rate=48000"]
-        # Upper voices sit further back; slow per-voice tremolo avoids a static drone.
-        voice_gain = -3.0 - i * 3.2
+                   f"aevalsrc='{wave}':d={dur:.2f}:s=48000"]
+        # The chord sits WELL back. Tonal content is colour here, not the body
+        # of the bed - a pad led by sustained pitches is what read as a beep,
+        # regardless of how many harmonics each pitch has.
+        voice_gain = -11.0 - i * 3.4
         trem = spec["trem"] * rng.uniform(0.8, 1.25) + i * 0.013
         chains.append(
             f"[{i}:a]volume={voice_gain:.1f}dB,"
             f"tremolo=f={max(trem, 0.1):.3f}:d=0.35,"
             f"afade=t=in:st=0:d=2.2[v{i}]")
 
-    # A brown-noise "air" layer gives the pad texture instead of a pure tone.
+    # Filtered noise is now the BODY of the bed, not a garnish. Two layers at
+    # different cutoffs and tremolo rates give slow movement, which is what
+    # keeps it from sitting there as a static tone.
     noise_idx = len(freqs)
     inputs += ["-f", "lavfi", "-i",
-               f"anoisesrc=color=brown:duration={dur:.2f}:sample_rate=48000:amplitude=0.5"]
-    chains.append(f"[{noise_idx}:a]lowpass=f=380,volume=-20dB,"
-                  f"tremolo=f=0.1:d=0.5[air]")
+               f"anoisesrc=color=brown:duration={dur:.2f}:sample_rate=48000:amplitude=0.7"]
+    chains.append(f"[{noise_idx}:a]lowpass=f={min(spec['lowpass'], 700)},"
+                  f"volume=-5dB,tremolo=f=0.1:d=0.55[air]")
 
-    mix_inputs = "".join(f"[v{i}]" for i in range(len(freqs))) + "[air]"
+    rumble_idx = noise_idx + 1
+    inputs += ["-f", "lavfi", "-i",
+               f"anoisesrc=color=pink:duration={dur:.2f}:sample_rate=48000:amplitude=0.5"]
+    chains.append(f"[{rumble_idx}:a]lowpass=f=200,highpass=f=45,"
+                  f"volume=-9dB,tremolo=f=0.13:d=0.4[rumble]")
+
+    mix_inputs = ("".join(f"[v{i}]" for i in range(len(freqs)))
+                  + "[air][rumble]")
     filter_complex = (
         ";".join(chains) +
-        f";{mix_inputs}amix=inputs={len(freqs) + 1}:normalize=0[mixed]"
+        f";{mix_inputs}amix=inputs={len(freqs) + 2}:normalize=0[mixed]"
         f";[mixed]highpass=f=40,lowpass=f={spec['lowpass']},"
         f"aecho={spec['echo']},"
         f"afade=t=out:st={max(dur - 2.0, 0.1):.2f}:d=2.0,"
