@@ -23,16 +23,24 @@ android {
         // 10.0.2.2 is the host machine as seen from the Android emulator.
         buildConfigField("String", "DEFAULT_BACKEND_URL", "\"http://10.0.2.2:8099/\"")
 
-        // OAuth redirect scheme, must match AndroidManifest + Google console.
-        manifestPlaceholders["appAuthRedirectScheme"] = "com.autotube.ai"
+        // OAuth redirect scheme. A Google *Android* OAuth client is validated
+        // by package name plus signing certificate, and AppAuth's redirect is
+        // "<package>:/oauth2redirect" - so the scheme MUST equal the real
+        // applicationId of the build being installed. It is set per build type
+        // below rather than once here, because the debug build carries an
+        // applicationIdSuffix: hard-coding "com.autotube.ai" made the debug
+        // APK request a redirect that did not match its own package, and
+        // Google rejects that.
     }
 
     buildTypes {
         debug {
             isMinifyEnabled = false
             applicationIdSuffix = ".debug"
+            manifestPlaceholders["appAuthRedirectScheme"] = "com.autotube.ai.debug"
         }
         release {
+            manifestPlaceholders["appAuthRedirectScheme"] = "com.autotube.ai"
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(

@@ -83,11 +83,38 @@ def doctor() -> None:
         cfg.has_secret("YOUTUBE_CLIENT_ID") and cfg.has_secret("YOUTUBE_CLIENT_SECRET"),
         "upload + analytics need this")
 
-    from engine.content.llm import LLMRouter
+    from engine.content.llm import LLMError, LLMRouter
     router = LLMRouter(list(cfg.get("content.llm_provider_order", [])), cfg)
     usable = [p.name for p in router.usable]
     row("LLM provider", bool(usable),
         f"usable: {', '.join(usable) or 'none - scripts fall back to template'}")
+
+    # Which model actually answers, not which one is configured. Model access
+    # varies by account: a real Groq key here could not use
+    # llama-3.3-70b-versatile at all and fell forward to gpt-oss-120b, which is
+    # correct behaviour but worth surfacing - you should know what is writing
+    # your scripts, and pinning the winner in .env saves one 404 per run.
+    for provider in router.usable:
+        if provider.name not in ("groq", "gemini"):
+            continue
+        try:
+            # Plain text, and generous headroom. A 32-token JSON-mode probe
+            # failed against both providers for uninteresting reasons: Groq
+            # truncated mid-object and rejected its own output, and Gemini 3.x
+            # spends tokens reasoning before it emits any, so it returned a
+            # candidate with no parts at all. Neither meant the key was bad.
+            result = provider.complete(
+                "Reply with the single word: ready", max_tokens=512)
+        except LLMError as exc:
+            row(f"  {provider.name} model", False, str(exc)[:64])
+            continue
+        pinned = str(cfg.secret(f"{provider.name.upper()}_MODEL") or "")
+        note = f"{result.model} answered"
+        if pinned and pinned != result.model:
+            note += f"  (you pinned {pinned}, which failed)"
+        elif not pinned:
+            note += f"  (pin it: {provider.name.upper()}_MODEL={result.model})"
+        row(f"  {provider.name} model", True, note)
 
     from engine.tts.providers import build_providers
     tts = [p.name for p in build_providers(list(cfg.get("tts.provider_order", [])))

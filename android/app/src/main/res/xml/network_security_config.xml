@@ -1,10 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  HTTPS is required everywhere by default.
+  RELEASE policy: HTTPS everywhere, system trust anchors only (spec section 31).
 
-  Cleartext is permitted ONLY for local development addresses, because during
-  setup the backend usually runs on the developer's own machine over plain HTTP
-  on the LAN. Anything on the public internet must be HTTPS (spec section 31).
+  There is a deliberate NO exception for LAN addresses here. An earlier version
+  tried to allow them with <domain includeSubdomains="true">192.168.1.0</domain>,
+  which does not do what it looks like: Android matches <domain> entries as
+  hostnames and includeSubdomains is DNS-suffix matching, not CIDR. That entry
+  matched nothing reachable, so plain-HTTP LAN setup failed anyway.
+
+  Listing every possible private address is not practical, and loosening this
+  for release builds would mean shipping an app that will talk to any plaintext
+  server. Local HTTP is a development concern, so it lives in the debug source
+  set instead: src/debug/res/xml/network_security_config.xml.
+
+  If you want the release build to reach a self-hosted backend, give it a real
+  hostname and a certificate (a free Let's Encrypt cert, or Tailscale/Cloudflare
+  Tunnel, both of which terminate TLS for you).
 -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="false">
@@ -12,14 +23,4 @@
             <certificates src="system" />
         </trust-anchors>
     </base-config>
-
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="false">localhost</domain>
-        <domain includeSubdomains="false">127.0.0.1</domain>
-        <!-- Host machine as seen from the Android emulator -->
-        <domain includeSubdomains="false">10.0.2.2</domain>
-        <!-- Common private LAN ranges for a phone talking to a local PC -->
-        <domain includeSubdomains="true">192.168.0.0</domain>
-        <domain includeSubdomains="true">192.168.1.0</domain>
-    </domain-config>
 </network-security-config>

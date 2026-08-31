@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -115,6 +116,27 @@ _MODEL_RETIRED = re.compile(
     r"decommissioned|discontinued|no longer (available|supported)|"
     r"has been (shut down|retired|removed)|unsupported model|"
     r"invalid model|unknown model)", re.I)
+
+
+# Conditions that clear on their own: rate limits (which are usually per
+# minute), and upstream overload. Retrying these beats downgrading to a weaker
+# provider. Auth failures and retired models are NOT here - no amount of
+# waiting fixes a bad key.
+#
+# The status codes are word-anchored on purpose. A bare `50[234]` also matches
+# inside "15034 tokens" and a bare `429` inside "14290", so an ordinary error
+# mentioning a token count would be misread as an upstream outage.
+_TRANSIENT_LLM = re.compile(
+    r"(\b429\b|rate limit|too many requests|\b50[234]\b|overloaded|"
+    r"unavailable|timed? ?out|timeout|temporarily|try again)", re.I)
+
+
+def _is_transient_llm(message: str) -> bool:
+    if re.search(r"\b(401|403)\b|invalid api key|permission denied", message, re.I):
+        return False
+    if _is_model_retired(message):
+        return False
+    return bool(_TRANSIENT_LLM.search(message))
 
 
 def _is_model_retired(message: str) -> bool:
@@ -244,10 +266,20 @@ class GeminiProvider:
 
     def _call(self, model: str, prompt: str, system: str, json_mode: bool,
               temperature: float, max_tokens: int) -> LLMResult:
+        # Gemini 2.5+ and the 3.x family spend output tokens on internal
+        # reasoning BEFORE emitting any text, and that spend counts against
+        # maxOutputTokens. Asking for 4096 on a script call produced exactly
+        # what you would expect once you know that: 2,169 characters of
+        # truncated JSON on one attempt and a candidate with zero parts on the
+        # next, after which the pipeline silently fell back to the template
+        # builder. The caller's budget is therefore treated as "text I want",
+        # not "total allowance", and thinking is capped so it cannot eat the lot.
+        budget = max(int(max_tokens) * 3, 8192)
         gen: dict[str, Any] = {"temperature": temperature,
-                               "maxOutputTokens": max_tokens}
+                               "maxOutputTokens": budget}
         if json_mode:
             gen["responseMimeType"] = "application/json"
+        gen["thinkingConfig"] = {"thinkingBudget": min(2048, budget // 4)}
         payload: dict[str, Any] = {
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": gen,
@@ -255,6 +287,40 @@ class GeminiProvider:
         if system:
             payload["systemInstruction"] = {"parts": [{"text": system}]}
         url = f"{self.BASE}/{model}:generateContent"
+
+        data = self._post(url, payload)
+        if data is None:
+            # Some models reject thinkingConfig outright. Retry without it
+            # rather than losing the provider over an optional field.
+            gen.pop("thinkingConfig", None)
+            log_event("LLM", "gemini rejected thinkingConfig, retrying without",
+                      model=model)
+            data = self._post(url, payload, allow_retry=False)
+
+        candidates = data.get("candidates") or []
+        if not candidates:
+            feedback = data.get("promptFeedback") or {}
+            raise LLMError(f"gemini returned no candidates "
+                           f"(promptFeedback={str(feedback)[:160]})")
+        candidate = candidates[0]
+        parts = ((candidate.get("content") or {}).get("parts")) or []
+        text = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
+        if not text:
+            # Surface finishReason and the token split. Without this the
+            # failure reads as "empty LLM response" and tells you nothing
+            # about which budget you actually exhausted.
+            usage = data.get("usageMetadata") or {}
+            raise LLMError(
+                f"gemini produced no text (finishReason="
+                f"{candidate.get('finishReason')}, "
+                f"thoughts={usage.get('thoughtsTokenCount')}, "
+                f"output={usage.get('candidatesTokenCount')}, "
+                f"budget={budget}) - raise max_tokens or lower thinkingBudget")
+        return LLMResult(text=text, provider=self.name, model=model)
+
+    def _post(self, url: str, payload: dict[str, Any],
+              allow_retry: bool = True) -> dict[str, Any] | None:
+        """POST once. Returns None if `thinkingConfig` was the problem."""
         with httpx.Client(timeout=self.timeout) as client:
             resp = client.post(url, json=payload,
                                headers={"x-goog-api-key": self.api_key,
@@ -262,15 +328,12 @@ class GeminiProvider:
             if resp.status_code == 429:
                 raise LLMError("gemini rate limit reached (free tier)")
             if resp.status_code >= 400:
-                raise LLMError(f"gemini {resp.status_code}: {resp.text[:220]}")
-            data = resp.json()
-        try:
-            parts = data["candidates"][0]["content"]["parts"]
-            text = "".join(p.get("text", "") for p in parts)
-        except (KeyError, IndexError) as exc:
-            reason = str(data)[:200]
-            raise LLMError(f"unexpected gemini response ({exc}): {reason}") from exc
-        return LLMResult(text=text, provider=self.name, model=model)
+                body = resp.text[:400]
+                if (allow_retry and resp.status_code == 400
+                        and "thinking" in body.lower()):
+                    return None
+                raise LLMError(f"gemini {resp.status_code}: {body[:220]}")
+            return resp.json()
 
 
 # --------------------------------------------------------------------------
@@ -392,6 +455,12 @@ class LLMRouter:
             factory = registry.get(name)
             if factory:
                 self.providers.append(factory())
+        # Free-tier limits reset per minute, so the default waits are long
+        # enough to actually clear one.
+        self.transient_retries = int(
+            cfg.get("content.transient_retries", 3) if cfg else 3)
+        self.retry_backoff = float(
+            cfg.get("content.retry_backoff_seconds", 25) if cfg else 25)
 
     @property
     def usable(self) -> list[LLMProvider]:
@@ -407,21 +476,57 @@ class LLMRouter:
         for provider in self.providers:
             if isinstance(provider, TemplateProvider):
                 continue
+            if not provider.available():
+                errors.append(f"{provider.name}: not configured")
+                continue
             try:
-                if not provider.available():
-                    errors.append(f"{provider.name}: not configured")
-                    continue
-                result = provider.complete(
-                    prompt, system=system, json_mode=json_mode,
-                    temperature=temperature, max_tokens=max_tokens)
-                log_event("LLM", "completion ok", provider=provider.name,
-                          model=result.model, chars=len(result.text))
-                return result
+                result = self._with_backoff(
+                    provider, prompt, system, json_mode, temperature, max_tokens)
             except Exception as exc:
                 errors.append(f"{provider.name}: {str(exc)[:180]}")
                 log_event("LLM", "provider failed, falling back",
                           provider=provider.name, error=str(exc)[:180])
+                continue
+            log_event("LLM", "completion ok", provider=provider.name,
+                      model=result.model, chars=len(result.text))
+            return result
         raise LLMError("no LLM provider succeeded -> " + " | ".join(errors))
+
+    def _with_backoff(self, provider, prompt: str, system: str, json_mode: bool,
+                      temperature: float, max_tokens: int) -> LLMResult:
+        """Retry ONE provider through transient conditions before giving up.
+
+        Free-tier limits are mostly per MINUTE, so falling straight through to
+        the next provider is the wrong move: waiting 30 seconds gets you the
+        good model, while moving on gets you a weaker one - or, at the end of
+        the chain, CPU-only ollama at minutes per call.
+
+        Seen against real keys in one run: Groq's gpt-oss-120b allows 8,000
+        tokens/minute and a single ideas call spent it, then Gemini answered
+        503 (transient overload). Both were treated as permanent failures and
+        the pipeline degraded all the way to local inference. Neither had to.
+
+        Only transient conditions are retried. A bad key or a retired model
+        fails immediately, because waiting cannot fix either.
+        """
+        attempts = max(1, self.transient_retries)
+        delay = self.retry_backoff
+        last: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return provider.complete(
+                    prompt, system=system, json_mode=json_mode,
+                    temperature=temperature, max_tokens=max_tokens)
+            except Exception as exc:
+                last = exc
+                if attempt >= attempts or not _is_transient_llm(str(exc)):
+                    raise
+                log_event("LLM", "transient, waiting rather than downgrading",
+                          provider=provider.name, attempt=f"{attempt}/{attempts}",
+                          wait=f"{delay:.0f}s", error=str(exc)[:120])
+                time.sleep(delay)
+                delay *= 2
+        raise last or LLMError(f"{provider.name} failed")
 
     def complete_json(self, prompt: str, *, system: str = "",
                       temperature: float = 0.8, max_tokens: int = 4096,

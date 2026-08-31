@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.activity.result.ActivityResultLauncher
+import com.autotube.ai.BuildConfig
 import com.autotube.ai.data.prefs.SecureStore
 import net.openid.appauth.AuthorizationException
 import net.openid.appauth.AuthorizationRequest
@@ -111,8 +112,21 @@ class YouTubeAuthManager(context: Context, private val store: SecureStore) {
     }
 
     companion object {
-        /** Must match `appAuthRedirectScheme` in build.gradle.kts. */
-        const val REDIRECT_SCHEME = "com.autotube.ai"
+        /**
+         * The redirect scheme is the application ID of THIS build, not a
+         * literal.
+         *
+         * A Google Android OAuth client is validated by package name plus
+         * signing certificate, and AppAuth's redirect URI is
+         * "<package>:/oauth2redirect". The debug build carries an
+         * applicationIdSuffix, so a hard-coded "com.autotube.ai" made the
+         * debug APK ask for a redirect that did not match its own package -
+         * which Google rejects, with an error that reads like a bad client ID.
+         *
+         * Deriving it from BuildConfig means the scheme, the manifest
+         * placeholder and the package can never drift apart again.
+         */
+        val REDIRECT_SCHEME: String = BuildConfig.APPLICATION_ID
 
         val SCOPES = listOf(
             "https://www.googleapis.com/auth/youtube.upload",

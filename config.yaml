@@ -53,7 +53,14 @@ scoring:
   breakout_ratio_threshold: 2.5  # views / expected-views-for-channel
 
 content:
-  llm_provider_order: [groq, gemini, ollama, template]
+  # Gemini first, deliberately. Groq's inference is faster, but its free tier
+  # is capped at 8,000 tokens PER MINUTE on the large models, and one ideas
+  # call measured here spent the entire minute budget - so a single job
+  # rate-limits itself repeatedly. Gemini's Flash free tier has far more
+  # token headroom (~1,500 requests/day, high TPM), which matters more than
+  # per-call latency when a job makes four to six calls back to back.
+  # Swap them back if you upgrade to a paid Groq tier.
+  llm_provider_order: [gemini, groq, ollama, template]
   temperature: 0.85
   max_ideas: 10
   # One scene = one visual = one TTS call, so this bounds the cost of a single
@@ -70,6 +77,13 @@ content:
   # would be hours. The outline call is timed and the run bails out if the
   # projection exceeds this.
   section_time_budget_seconds: 600
+  # Free-tier LLM limits are mostly per MINUTE, so when one is hit it is better
+  # to wait than to fall through to a weaker provider. Measured on real keys:
+  # one ideas call spent Groq's whole 8,000 tokens/minute budget, and Gemini
+  # answered a transient 503 - and the pipeline degraded to CPU-only ollama
+  # when 25 seconds of patience would have kept the good model.
+  transient_retries: 3
+  retry_backoff_seconds: 25
   fact_check_required_niches: [science, technology, finance, health, history, space, news]
 
 tts:

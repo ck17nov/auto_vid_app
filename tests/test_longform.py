@@ -20,7 +20,8 @@ from pathlib import Path
 
 import pytest
 
-from engine.content.llm import LLMError, _is_model_retired
+from engine.content.llm import (LLMError, _is_model_retired,
+                                _is_transient_llm)
 from engine.content.metadata import MetadataGenerator
 from engine.content.script import ScriptGenerator
 from engine.core.config import load_config
@@ -681,3 +682,134 @@ class TestSpeechRateCalibration:
         pipe.db.get_setting = boom
         pipe._record_speech_rate("en", self._Spec(), self._script(120), 50.0)
         assert pipe.calibrated_words_per_second("en", self._Spec(), 2.9) == 2.9
+
+
+# ==========================================================================
+# Transient handling: wait rather than downgrade
+# ==========================================================================
+class TestTransientRetry:
+    """Free-tier limits are per MINUTE, so falling through is the wrong move.
+
+    Observed on real keys in one run: a single ideas call spent Groq's whole
+    8,000 tokens/minute budget, then Gemini answered a transient 503, and the
+    pipeline degraded all the way to CPU-only ollama. Twenty-five seconds of
+    patience would have kept the good model.
+    """
+
+    @pytest.mark.parametrize("message", [
+        "groq rate limit reached (free tier)",
+        "gemini 429: RESOURCE_EXHAUSTED",
+        "gemini 503: The model is overloaded. Please try again later.",
+        "groq 502: bad gateway",
+        "gemini 504: deadline exceeded",
+        "httpx.ReadTimeout: timed out",
+        "service temporarily unavailable",
+    ])
+    def test_transient_conditions_are_retried(self, message):
+        assert _is_transient_llm(message) is True
+
+    @pytest.mark.parametrize("message", [
+        "groq 401: Invalid API Key",
+        "gemini 403: permission denied",
+        "groq 404: model_not_found",
+        "gemini 400: models/gemini-2.0-flash is not found",
+        "groq 400: max_tokens must be an integer",
+    ])
+    def test_permanent_failures_are_not_retried(self, message):
+        assert _is_transient_llm(message) is False
+
+    @pytest.mark.parametrize("message", [
+        "groq 400: your prompt used 15034 tokens, over the limit",
+        "groq 400: request had 14290 characters",
+    ])
+    def test_status_codes_are_word_anchored(self, message):
+        """`50[234]` unanchored matches inside "15034"; `429` inside "14290".
+
+        Without word boundaries an ordinary message mentioning a token count
+        looks like an upstream outage and gets pointlessly retried.
+        """
+        assert _is_transient_llm(message) is False
+
+    def test_the_pattern_uses_real_escapes_not_control_bytes(self):
+        """Guard against a specific corruption that silently disabled this.
+
+        An editing mistake wrote literal 0x08 BACKSPACE bytes into the source
+        where the two-character escape `\b` was meant. Inside a raw string
+        that makes the pattern match an actual backspace character, so nothing
+        ever matched and every transient error was treated as permanent - with
+        no syntax error and no failing test to show it.
+        """
+        source = Path("engine/content/llm.py").read_bytes()
+        assert bytes([8]) not in source,             "literal backspace byte in llm.py - the \b escapes are corrupted"
+
+    def test_a_provider_is_retried_before_the_next_one_is_tried(self):
+        from engine.content.llm import LLMRouter, LLMResult
+
+        router = LLMRouter([], cfg=None)
+        router.retry_backoff = 0.0
+
+        class Flaky:
+            name = "flaky"
+
+            def __init__(self):
+                self.calls = 0
+
+            def available(self):
+                return True
+
+            def complete(self, prompt, **kw):
+                self.calls += 1
+                if self.calls < 3:
+                    raise LLMError("rate limit reached (free tier)")
+                return LLMResult(text="ok", provider=self.name, model="m")
+
+        class Weaker:
+            name = "weaker"
+            used = False
+
+            def available(self):
+                return True
+
+            def complete(self, prompt, **kw):
+                Weaker.used = True
+                return LLMResult(text="worse", provider=self.name, model="m")
+
+        flaky = Flaky()
+        router.providers = [flaky, Weaker()]
+        result = router.complete("hi")
+        assert result.provider == "flaky", "must not downgrade on a rate limit"
+        assert flaky.calls == 3
+        assert Weaker.used is False
+
+    def test_a_permanent_failure_moves_on_immediately(self):
+        from engine.content.llm import LLMRouter, LLMResult
+
+        router = LLMRouter([], cfg=None)
+        router.retry_backoff = 0.0
+
+        class Broken:
+            name = "broken"
+
+            def __init__(self):
+                self.calls = 0
+
+            def available(self):
+                return True
+
+            def complete(self, prompt, **kw):
+                self.calls += 1
+                raise LLMError("groq 401: Invalid API Key")
+
+        class Good:
+            name = "good"
+
+            def available(self):
+                return True
+
+            def complete(self, prompt, **kw):
+                return LLMResult(text="ok", provider=self.name, model="m")
+
+        broken = Broken()
+        router.providers = [broken, Good()]
+        assert router.complete("hi").provider == "good"
+        assert broken.calls == 1, "a bad key must not be retried three times"
