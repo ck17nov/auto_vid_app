@@ -55,7 +55,12 @@ import kotlinx.serialization.json.jsonPrimitive
  * Screen 5: video preview with title, description, thumbnail and scores,
  * plus the approve/reject decision (spec sections 24 & 32).
  */
-@OptIn(UnstableApi::class)
+// Media3 marks these APIs with @UnstableApi, which is a JAVA annotation
+// using androidx.annotation.RequiresOptIn - not Kotlin's @RequiresOptIn.
+// kotlin.OptIn therefore compiles but does NOT satisfy it, and lint fails
+// with UnsafeOptInUsageError. The androidx form is the one that counts.
+// markerClass is a vararg (Class<?>[]), so Kotlin named form needs an array.
+@androidx.annotation.OptIn(markerClass = [UnstableApi::class])
 @Composable
 fun PreviewScreen(jobId: String, onBack: () -> Unit) {
     val vm: JobViewModel = appViewModel()
