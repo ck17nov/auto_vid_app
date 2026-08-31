@@ -130,6 +130,45 @@ def doctor() -> None:
         f"min quality: {cfg.get('quality.minimum_score')}",
         title="config", expand=False))
 
+    # Long-form has its own preconditions, and the failure mode without them is
+    # slow and confusing: you discover it after the render, not before it.
+    max_scenes = int(cfg.get("content.max_scenes", 400))
+    hosted = [n for n in usable if n in ("groq", "gemini")]
+    if hosted:
+        longform = [f"Long-form   [green]ready[/green] via {', '.join(hosted)}, "
+                    f"up to {max_scenes} scenes/video"]
+    elif "ollama" in usable:
+        # Sectioned generation makes one call per section, so a slow local
+        # model multiplies. Measured here: >10 min per call on CPU. The run
+        # bails out of sectioned mode and template-fills instead, which is
+        # honest but not what you want from a 20-minute video.
+        longform = [
+            "Long-form   [yellow]degraded[/yellow] - only ollama is usable",
+            "            A long script needs ~14 calls, and CPU-only ollama",
+            "            measured over 10 min each, so most sections would",
+            "            fall back to the template builder.",
+            "            Set GROQ_API_KEY or GEMINI_API_KEY (free) to fix.",
+        ]
+    else:
+        longform = [
+            "Long-form   [red]blocked[/red] - no LLM configured",
+            "            The template builder cannot honestly fill more than",
+            "            ~2 minutes of narration. Set GROQ_API_KEY or",
+            "            GEMINI_API_KEY (free, no credit card).",
+        ]
+    lines = [
+        "Shorts      [green]ready[/green], up to 3 minutes" if tts else
+        "Shorts      [red]blocked[/red] - no TTS provider",
+        *longform,
+        "",
+        "YouTube caps uploads at 15 minutes until the channel is",
+        "verified (free: Studio > Settings > Channel > Feature",
+        "eligibility). Nothing here generates video, so length is",
+        "bounded by render time, not by a service quota.",
+        "See docs/SERVICE_COSTS.md section 6a.",
+    ]
+    console.print(Panel("\n".join(lines), title="video length", expand=False))
+
 
 # ==========================================================================
 @auth_app.command("login")

@@ -212,6 +212,10 @@ class Script(JsonMixin):
     provider: str = ""
     retention_score: float = 0.0
     retention_notes: list[str] = field(default_factory=list)
+    # Long-form only: section boundaries from the outline, as
+    # {"heading": str, "scene_index": int}. Used for real YouTube chapters
+    # instead of guessing labels from narration.
+    chapters: list[dict[str, Any]] = field(default_factory=list)
 
     def scene_objects(self) -> list[Scene]:
         out = []

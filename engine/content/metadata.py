@@ -18,6 +18,9 @@ from ..core.util import clamp, keywords, sentences, token_overlap, truncate, wor
 YOUTUBE_TITLE_LIMIT = 100
 YOUTUBE_DESC_LIMIT = 5000
 YOUTUBE_TAGS_TOTAL_CHARS = 460          # 500 with separators; stay safely under
+# A 40-minute video legitimately has more than a dozen sections. YouTube has
+# no documented chapter ceiling; 30 keeps the description readable.
+MAX_CHAPTERS = 30
 
 CURIOSITY_WORDS = {
     "why", "how", "what", "who", "actually", "really", "hidden", "secret",
@@ -264,6 +267,33 @@ Return JSON: {{"titles": ["...", "..."]}}"""
     def build_chapters(self, script: Script) -> list[dict[str, Any]]:
         """Chapters for long-form. YouTube needs the first one at 00:00."""
         scenes = script.scene_objects()
+
+        # A sectioned long-form script already carries real section headings
+        # from its outline. Those are far better chapter labels than the first
+        # sentence of some scene's narration, so prefer them when present.
+        if script.chapters:
+            starts: list[float] = []
+            cursor = 0.0
+            for scene in scenes:
+                starts.append(cursor)
+                cursor += scene.duration or 0.0
+            out: list[dict[str, Any]] = []
+            for chapter in script.chapters:
+                idx = int(chapter.get("scene_index", 0))
+                if not 0 <= idx < len(starts):
+                    continue
+                seconds = round(starts[idx], 1)
+                # YouTube requires chapters to be at least 10s apart and the
+                # first at 00:00, or it silently shows none at all.
+                if out and seconds - out[-1]["seconds"] < 10.0:
+                    continue
+                out.append({"seconds": seconds,
+                            "label": str(chapter.get("heading") or "").strip()
+                                     or f"Part {len(out) + 1}"})
+            if out:
+                out[0]["seconds"] = 0.0
+                return out[:MAX_CHAPTERS]
+
         chapters: list[dict[str, Any]] = []
         cursor = 0.0
         for scene in scenes:
@@ -279,7 +309,7 @@ Return JSON: {{"titles": ["...", "..."]}}"""
             cursor += span
         if chapters:
             chapters[0]["seconds"] = 0.0
-        return chapters[:12]
+        return chapters[:MAX_CHAPTERS]
 
     # ------------------------------------------------------------------
     def build_description(self, script: Script, idea: ContentIdea,

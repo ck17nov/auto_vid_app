@@ -14,6 +14,12 @@ zoompan + xfade + subtitles is fragile and impossible to debug; doing it in
 three passes would re-encode the video twice and cost quality. Two passes is
 the balance: exactly one lossy video encode.
 
+Long-form: past `video.render_segment_max` clips, Pass B is split into a
+batched pre-stitch plus one final pass. This is not an extra lossy generation -
+the segments are near-lossless intermediates and the delivery encode still
+happens exactly once. It exists because one ffmpeg call cannot take hundreds of
+inputs.
+
 Timeline maths: the audio track is authoritative. Scene visual lengths are
 padded so that each cross-fade is centred on its narration boundary and the
 total video length equals the total audio length exactly - see `_clip_lengths`.
@@ -22,6 +28,7 @@ from __future__ import annotations
 
 import shutil
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -73,6 +80,11 @@ class VideoComposer:
         self.contrast = float(cfg.get("video.contrast", 1.045))
         self.saturation = float(cfg.get("video.saturation", 1.07))
         self.target_lufs = float(cfg.get("tts.target_lufs", -14.0))
+        # Above this many clips the xfade chain is rendered in segments - see
+        # finalize(). One ffmpeg call cannot take 300 inputs: Windows caps a
+        # command line at 32,767 characters and each input costs a path plus a
+        # filter node, so a long-form video would fail to launch at all.
+        self.segment_max = max(4, int(cfg.get("video.render_segment_max", 40)))
 
     # ------------------------------------------------------------------
     # Geometry
@@ -304,9 +316,65 @@ class VideoComposer:
             current = label
         return ";".join(parts), current
 
+    def _render_segments(self, clips: list[Path], lengths: list[float],
+                         work_dir: Path) -> tuple[list[Path], list[float]]:
+        """Pre-stitch clips in batches, returning (segment files, durations).
+
+        Hierarchical cross-fading is duration-exact, which is why it is safe to
+        do. With n clips, transition T and per-clip padded lengths L, a flat
+        chain outputs sum(L) - (n-1)*T. Splitting into S segments gives each
+        segment sum(L in segment) - (count-1)*T, and cross-fading the S
+        segments together removes a further (S-1)*T. The two removals add up to
+        exactly (n-1)*T, so the total is unchanged and every transition is
+        still centred on its scene boundary.
+
+        Segments are encoded near-lossless (CRF 16) because they are an
+        intermediate: captions, colour grade and the real encode all happen in
+        the single final pass, so the video is still only lossy-encoded once at
+        delivery quality.
+        """
+        ensure_dir(work_dir)
+        segments: list[Path] = []
+        durations: list[float] = []
+        step = self.segment_max
+        for seg_no, start in enumerate(range(0, len(clips), step)):
+            group = clips[start:start + step]
+            group_lengths = lengths[start:start + step]
+            target = work_dir / f"segment_{seg_no:03d}.mp4"
+            chain, vlabel = self._xfade_chain(group, group_lengths)
+            inputs: list[str] = []
+            for c in group:
+                inputs += ["-i", str(c)]
+            run([ffmpeg_bin(), "-y", "-loglevel", "error", *inputs,
+                 "-filter_complex", f"{chain};{vlabel}format=yuv420p[vseg]",
+                 "-map", "[vseg]",
+                 "-c:v", "libx264", "-crf", "16", "-preset", "veryfast",
+                 "-pix_fmt", "yuv420p", "-an", str(target)], timeout=3600)
+            expected = sum(group_lengths) - (len(group) - 1) * self.transition_dur
+            actual = probe_duration(target)
+            if abs(actual - expected) > 0.12:
+                log_event("VIDEO", "segment duration drifted",
+                          segment=seg_no, expected=f"{expected:.3f}",
+                          actual=f"{actual:.3f}")
+            segments.append(target)
+            durations.append(actual)
+        log_event("VIDEO", "clips pre-stitched into segments",
+                  clips=len(clips), segments=len(segments),
+                  per_segment=step)
+        return segments, durations
+
     def finalize(self, clips: list[Path], durations: list[float], audio: Path,
                  ass_file: Path | None, out_path: Path, w: int, h: int) -> RenderResult:
         lengths = self._clip_lengths(durations)
+
+        # Long-form: pre-stitch in batches so the final call has a handful of
+        # inputs instead of hundreds. Duration is preserved exactly (see
+        # _render_segments), so captions stay in sync.
+        segment_dir: Path | None = None
+        if len(clips) > self.segment_max:
+            segment_dir = out_path.parent / "segments"
+            clips, lengths = self._render_segments(clips, lengths, segment_dir)
+
         chain, vlabel = self._xfade_chain(clips, lengths)
 
         filters = [chain]
@@ -319,9 +387,19 @@ class VideoComposer:
                 f":alpha=1[vsub]")
             vlabel = "[vsub]"
         # Mild contrast/saturation lift reads better on phone screens.
+        #
+        # Then a real colour-range conversion, which matters more than it looks.
+        # The source images are JPEG, so everything upstream is FULL range
+        # (yuvj420p). Delivered untouched, ffprobe reported the finished file as
+        # `pix_fmt=yuvj420p, color_range=pc, color_space=bt470bg` - full range
+        # tagged as PAL. Any player that honours the range tag crushes blacks
+        # and clips highlights, and bt470bg is simply the wrong matrix for HD.
+        # `scale=in_range=pc:out_range=tv` remaps the values properly rather
+        # than just relabelling them, and the encoder flags below tag BT.709.
         filters.append(
             f"{vlabel}eq=contrast={self.contrast:.3f}:"
-            f"saturation={self.saturation:.3f},format=yuv420p[vfinal]")
+            f"saturation={self.saturation:.3f},"
+            f"scale=in_range=pc:out_range=tv,format=yuv420p[vfinal]")
 
         inputs: list[str] = []
         for c in clips:
@@ -335,10 +413,28 @@ class VideoComposer:
                "-c:v", "libx264", "-crf", str(self.crf), "-preset", self.preset,
                "-profile:v", "high", "-level", "4.2",
                "-pix_fmt", "yuv420p",
-               "-x264-params", "keyint=60:min-keyint=30:scenecut=40",
+               # Tag what we actually produced: limited-range BT.709, the
+               # standard for HD delivery and what YouTube assumes.
+               "-color_range", "tv", "-colorspace", "bt709",
+               "-color_primaries", "bt709", "-color_trc", "bt709",
+               # The colour flags above set the container/stream metadata;
+               # writing them into the x264 VUI too means a decoder reading
+               # only the bitstream still gets it right.
+               "-x264-params",
+               ("keyint=60:min-keyint=30:scenecut=40:"
+                "colorprim=bt709:transfer=bt709:colormatrix=bt709:fullrange=off"),
                "-c:a", "aac", "-b:a", self.audio_bitrate, "-ar", "48000", "-ac", "2",
                "-movflags", "+faststart", "-shortest", str(out_path)]
-        run(cmd, timeout=3600)
+        # A flat hour-long timeout is fine for a Short and far too tight for a
+        # 40-minute video: allow 20x realtime plus a floor, capped at 6 hours.
+        total = sum(lengths)
+        run(cmd, timeout=int(min(21600, max(3600, total * 20))))
+
+        if segment_dir is not None:
+            for seg in segment_dir.glob("segment_*.mp4"):
+                seg.unlink(missing_ok=True)
+            with suppress(OSError):
+                segment_dir.rmdir()
 
         dur = probe_duration(out_path)
         log_event("VIDEO", "final render complete", seconds=f"{dur:.2f}",

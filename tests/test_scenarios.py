@@ -13,7 +13,8 @@ import pytest
 from engine.content.metadata import MetadataGenerator
 from engine.content.originality import FactChecker, OriginalityChecker
 from engine.content.retention import analyze
-from engine.content.script import _budget, _structure, build_template_script
+from engine.content.script import (DEFAULT_MAX_SCENES, _budget, _spread,
+                                   _structure, build_template_script)
 from engine.core.config import load_config
 from engine.core.models import (ContentIdea, ResearchVideo, Scene, Script,
                                 VideoMetadata)
@@ -145,11 +146,43 @@ class TestLongformScenario:
         assert roles[0] == "hook"
 
     def test_longform_scene_count_scales_with_duration(self):
+        """Scene count must track duration, not sit on a flat cap.
+
+        This asserted `<= 24` for a while, which is exactly the bug it should
+        have caught: a 10-minute video got 24 scenes, i.e. one still image held
+        on screen for 25 seconds. The real requirement is a pacing ceiling.
+        """
         profile = build_profile("history", duration_seconds=600)
         _, _, short_scenes = _budget(build_profile("history", duration_seconds=45), 45)
         _, _, long_scenes = _budget(profile, 600)
         assert long_scenes > short_scenes
-        assert long_scenes <= 24, "scene count must stay bounded"
+        assert 600 / long_scenes <= 12.0, (
+            f"{600 / long_scenes:.1f}s per visual is a slideshow, not a video")
+
+    def test_scene_count_is_bounded_by_the_configured_cap(self):
+        """Cost is bounded, but by an explicit cap rather than by accident."""
+        profile = build_profile("history", duration_seconds=3600)
+        _, _, scenes = _budget(profile, 3600, max_scenes=120)
+        assert scenes == 120
+
+    def test_hour_long_request_stays_under_the_default_cap(self):
+        profile = build_profile("history", duration_seconds=3600)
+        _, _, scenes = _budget(profile, 3600)
+        assert 3 < scenes <= DEFAULT_MAX_SCENES
+
+    def test_word_budget_scales_linearly_with_duration(self):
+        profile = build_profile("history", duration_seconds=600)
+        w45, _, _ = _budget(build_profile("history", duration_seconds=45), 45)
+        w600, _, _ = _budget(profile, 600)
+        # Same niche pacing, so words must scale with time, not flatten out.
+        assert w600 > w45 * 8
+
+    def test_spread_never_loses_the_remainder(self):
+        for total, parts in ((3120, 13), (100, 7), (5, 5), (9360, 40), (7, 1)):
+            chunks = _spread(total, parts)
+            assert len(chunks) == parts
+            assert sum(chunks) == total, (total, parts, chunks)
+            assert max(chunks) - min(chunks) <= 1, "must be evenly distributed"
 
     def test_longform_captions_are_smaller_and_wider(self, cfg, tmp_path):
         from tests.test_media import make_clip

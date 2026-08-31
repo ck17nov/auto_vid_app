@@ -9,7 +9,7 @@ from engine.content.llm import LLMError, LLMRouter, TemplateProvider, extract_js
 from engine.content.metadata import MetadataGenerator
 from engine.content.originality import FactChecker, OriginalityChecker
 from engine.content.retention import analyze, auto_improve
-from engine.content.script import (BANNED_OPENERS, ScriptGenerator,
+from engine.content.script import (ScriptGenerator,
                                     build_template_script, strip_banned_opener,
                                     _budget, _structure)
 from engine.core.config import load_config

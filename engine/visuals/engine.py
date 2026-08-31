@@ -1,6 +1,7 @@
 """Visual engine: resolves one image per scene and writes the AssetManifest."""
 from __future__ import annotations
 
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -62,6 +63,23 @@ class VisualEngine:
         if parallel is None:
             parallel = int(self.cfg.get("visuals.parallel", 2))
 
+        # Rate limiting is a property of the PROVIDER, not of a scene. Retrying
+        # a 429 per scene, three times each with exponential backoff, is
+        # reasonable for a 12-scene Short and ruinous for a 71-scene long-form
+        # video: measured at ~15s of pure backoff per scene, i.e. 18 minutes
+        # spent waiting to be refused. Once a provider has refused
+        # `breaker_limit` times in a row, stop offering it this job.
+        # The breaker is RATE based, not consecutive-failure based. Measured
+        # against Pollinations on a 71-scene job: it refused about half the
+        # requests, so a consecutive counter never reached three and the job
+        # paid ~15s of backoff on every second scene regardless.
+        breaker_limit = max(1, int(self.cfg.get("visuals.breaker_limit", 3)))
+        breaker_rate = float(self.cfg.get("visuals.breaker_failure_rate", 0.5))
+        attempted: dict[str, int] = {}
+        failed: dict[str, int] = {}
+        tripped: set[str] = set()
+        lock = threading.Lock()
+
         def work(scene: Scene) -> Asset:
             req = VisualRequest(
                 scene_index=scene.index,
@@ -74,6 +92,9 @@ class VisualEngine:
             target = out_dir / f"image_{scene.index:02d}.jpg"
             errors: list[str] = []
             for provider in self.providers:
+                if provider.name in tripped:
+                    errors.append(f"{provider.name}: skipped (rate limited)")
+                    continue
                 if not provider.available():
                     errors.append(f"{provider.name}: no credentials")
                     continue
@@ -82,6 +103,8 @@ class VisualEngine:
                 # field while its neighbours are photographs looks like a bug,
                 # and free image endpoints rate-limit constantly.
                 attempts = self.transient_retries if provider.name != "procedural" else 1
+                with lock:
+                    attempted[provider.name] = attempted.get(provider.name, 0) + 1
                 for attempt in range(1, attempts + 1):
                     try:
                         asset = provider.fetch(req, target)
@@ -95,6 +118,26 @@ class VisualEngine:
                             log_event("VISUAL", "provider failed, falling back",
                                       scene=scene.index, provider=provider.name,
                                       error=str(exc)[:140])
+                            # `procedural` is the floor of the chain: dropping
+                            # it would strand a scene with no image at all.
+                            if provider.name != "procedural":
+                                with lock:
+                                    failed[provider.name] = \
+                                        failed.get(provider.name, 0) + 1
+                                    fails = failed[provider.name]
+                                    tries = max(attempted[provider.name], 1)
+                                    if (fails >= breaker_limit
+                                            and fails / tries >= breaker_rate
+                                            and provider.name not in tripped):
+                                        tripped.add(provider.name)
+                                        log_event(
+                                            "VISUAL",
+                                            "provider dropped for this job",
+                                            provider=provider.name,
+                                            failed=f"{fails}/{tries} scenes",
+                                            reason="a rate limit is global, so "
+                                                   "retrying it per scene only "
+                                                   "buys backoff")
                             break
                         wait = self.retry_backoff * (2 ** (attempt - 1))
                         log_event("VISUAL", "transient failure, retrying",

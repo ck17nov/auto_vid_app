@@ -61,25 +61,47 @@ is not guaranteed). Do not design around getting one.
 
 ## 2. LLM (script + idea generation) — pick at least one
 
+> **Model IDs expire.** This project originally pinned `gemini-2.0-flash`,
+> which Google **shut down on 2026-06-01**; every script request then failed
+> with a 404 that read like a broken API key. Both providers now carry a
+> fallback list and fall forward automatically when a model ID is retired
+> (`_is_model_retired` in `engine/content/llm.py`). Never pin a single ID.
+
 ### Groq — RECOMMENDED PRIMARY
 | | |
 |---|---|
 | **FREE?** | **LIMITED** — generous free tier, no credit card required |
-| Limit | per-minute and per-day request/token limits that vary by model; sufficient for a handful of videos a day |
 | Credit card | **No** |
-| Payment after trial | No — the free tier is ongoing, with a separate paid tier if you want higher limits |
-| Model used | `llama-3.3-70b-versatile` |
+| Payment after trial | No — the free tier is ongoing, with a separate paid tier for higher limits |
 | Commercial use | Yes |
-| Sufficient for production? | Yes at 1–5 videos/day. Not for bulk generation. |
 
-### Google Gemini (AI Studio) — RECOMMENDED FALLBACK
+Free-tier limits, per **organisation** (not per key), verified 2026-08:
+
+| Model | Req/min | Req/day | Tokens/min | Tokens/day |
+|---|---:|---:|---:|---:|
+| `llama-3.3-70b-versatile` (default) | 30 | 1,000 | 12,000 | 100,000 |
+| `openai/gpt-oss-120b` | 30 | 1,000 | 8,000 | 200,000 |
+| `llama-3.1-8b-instant` | 30 | 14,400 | 6,000 | 500,000 |
+
+You hit whichever limit arrives first, and cached tokens do not count.
+
+**What that means for long videos.** A 20-minute script is ~3,100 words. Written
+section by section that is roughly 14 calls and ~25,000 tokens, so the 100,000
+tokens/day ceiling on the 70B model allows about **4 long videos/day** — which
+happens to match the YouTube upload quota, so it is not the binding limit.
+
+### Google Gemini (AI Studio) — RECOMMENDED FALLBACK, AND BETTER FOR LONG-FORM
 | | |
 |---|---|
-| **FREE?** | **LIMITED** — free tier, no credit card |
-| Limit | per-minute/per-day request limits; `gemini-2.0-flash` free tier is ample here |
+| **FREE?** | **LIMITED** — free tier, no credit card, does not expire |
+| Limit | ~1,500 requests/day on the Flash tier, 15 req/min, up to 1M tokens/min |
 | Credit card | **No** for AI Studio keys |
+| Model used | `gemini-3.7-flash`, falling back through 3.6 / 3.5 / 3.5-lite / 2.5 |
 | Data note | Free-tier prompts may be used by Google to improve their products. Do not send anything confidential. |
-| Sufficient for production? | Yes at low volume |
+| Sufficient for production? | Yes, and its token allowance is far more comfortable than Groq's for long-form |
+
+Limits are **per project**, not per key — extra keys in the same project add
+nothing. Check yours at <https://aistudio.google.com/rate-limit>.
 
 ### Ollama (local) — OFFLINE FALLBACK
 | | |
@@ -180,9 +202,53 @@ can never fail for lack of an image.
 |---|---|---|
 | OpenAI / Anthropic APIs | **NO** — paid, credit card required | Groq and Gemini free tiers cover this workload |
 | ElevenLabs TTS | **LIMITED** — small monthly character quota, then paid | Free quota is exhausted in a few videos; credit card needed for anything real |
-| Runway / Pika / Sora (text-to-video) | **NO** — paid, and expensive | Spec section 42 is explicit: do not assume free cinematic AI video exists. It does not. The image + motion + caption approach here looks good and costs nothing. |
+| Runway / Pika / Kling / Veo / Sora (text-to-video) | **NO** — see section 6a | Every "free unlimited AI video" offer is a metered trial. Section 6a has the detail. |
 | Stability AI API | **NO** — paid credits | Pollinations covers the same need for free |
 | YouTube revenue reporting | Free but gated | Requires monetisation and additional scopes; the dashboard shows Revenue as an explicit placeholder |
+
+---
+
+## 6a. "Free unlimited AI video generation" — what is actually true
+
+Checked again 2026-08. Short answer: **no cloud service gives you unlimited,
+watermark-free, commercially-usable AI video for free.** Every free plan is a
+metered trial. The common patterns are:
+
+- **Credit-metered free tiers** (Kling, Hailuo, Pika, Luma, Runway): a handful
+  of clips, then payment. Clips are typically 5–10 seconds.
+- **Watermarks** on free output, which YouTube viewers see and which look like
+  someone else's branding on your channel.
+- **Non-commercial free tiers**: several providers restrict free output to
+  personal use, which a monetised YouTube channel is not.
+- **Browser-only free tiers with no API**, so they cannot be automated at all.
+
+**The two things that genuinely are unlimited and free:**
+
+1. **Local rendering — what this project does.** Images plus Ken Burns motion,
+   cross-fades and burnt-in captions, composed by FFmpeg on your own machine.
+   No service is involved in making the video, so there is no quota and no
+   length limit. This is why AutoTube AI can produce a 40-minute video for ₹0
+   while a text-to-video API would refuse past 10 seconds.
+2. **Self-hosted open-weight video models** (e.g. Mochi 1, Apache 2.0).
+   Genuinely unlimited with full commercial rights — but they need a ~24 GB
+   GPU, and they generate *seconds* per clip, not minutes. They would slot in
+   as another visual provider, not as a replacement for the renderer.
+
+**So what actually limits video length here?** Not a video-generation service,
+because there isn't one in the chain:
+
+| Limit | Value | Notes |
+|---|---|---|
+| Local render | none | bounded only by CPU time |
+| YouTube upload, unverified account | **15 minutes** | the real ceiling for most people |
+| YouTube upload, verified account | **12 hours / 256 GB** | verify your account to lift the 15-minute cap |
+| Scene count | `content.max_scenes` (400) | one scene = one image + one TTS call |
+| Script generation | free-tier tokens/day | ~4 long videos/day, see section 2 |
+| Music bed | none | synthesised to length, not sampled from a library |
+
+Verifying your YouTube account is the single change that raises the ceiling
+most, and it is free: **YouTube Studio → Settings → Channel → Feature
+eligibility → Upload videos longer than 15 minutes.**
 
 ---
 
@@ -193,10 +259,12 @@ YouTube Data + Analytics API, Groq *or* Gemini, edge-tts *or* Piper,
 Pixabay/Pexels *or* Pollinations *or* procedural, FFmpeg, everything local.
 
 **What will actually stop you first, in order:**
-1. **YouTube upload quota** — ~4–5 uploads/day. Hard ceiling.
-2. **Your own anti-spam limits** — `automation.daily_video_limit` defaults to 3.
-3. **LLM free-tier rate limits** — only if you generate in bursts.
-4. **Render time** — a 45 s Short takes a few minutes of CPU on a laptop.
+1. **YouTube's 15-minute cap** if your account is not verified. Free to lift.
+2. **YouTube upload quota** — ~4–5 uploads/day. Hard ceiling.
+3. **Your own anti-spam limits** — `automation.daily_video_limit` defaults to 3.
+4. **LLM free-tier tokens/day** — the first thing you notice on long-form.
+5. **Render time** — a few minutes of CPU per 45 s Short, and it scales with
+   length. This is why rendering is not on the phone.
 
 **What costs money only if you choose it:**
 Better TTS, paid LLMs, real text-to-video, cloud rendering.

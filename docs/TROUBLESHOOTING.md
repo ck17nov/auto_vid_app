@@ -33,6 +33,26 @@ Windows has no system timezone database.
 
 It is already in `requirements.txt`; this means the install did not complete.
 
+### Gradle: `JAVA_HOME is set to an invalid directory`
+
+`JAVA_HOME` is pointing at a JDK that is no longer installed - a stale
+`jdk-20` path is a common leftover, and it breaks the Android build with
+no other symptom. Find the real one:
+
+```bash
+ls "$LOCALAPPDATA/Programs/Microsoft" | grep jdk
+```
+
+Then point `JAVA_HOME` at it for the shell you build in (PowerShell):
+
+```
+$env:JAVA_HOME = 'C:\Users\<you>\AppData\Local\Programs\Microsoft\jdk-17.0.10.7-hotspot'
+```
+
+Set it permanently under **System Properties -> Environment Variables**.
+Android Studio uses its own bundled JDK, so the IDE can keep working
+while every command-line build fails.
+
 ### `no usable font found`
 Put any `.ttf` in `assets/fonts/`. The engine tries to download Anton (SIL OFL)
 automatically, then falls back to a system font — if both failed you are offline
@@ -176,6 +196,72 @@ fault.
 Filter parameter ranges differ between FFmpeg versions. `tremolo` rejects
 frequencies below 0.1 Hz, which is why the music moods are clamped to that floor.
 If you edit `music.py`, respect the documented ranges for your build.
+
+---
+
+## Long-form
+
+### `a <N>s video needs a real LLM`
+
+Preflight refuses long-form without `GROQ_API_KEY` or `GEMINI_API_KEY`. This is
+deliberate. The template builder assembles framing sentences and there are only
+so many honest ones - it tops out around 200 words. Asking it for a 10-minute
+video would either repeat itself or force the narration so slow it fails the
+duration check, and you would only find that out after an hour of rendering.
+
+Both keys are free and need no credit card. See [API_SETUP.md](API_SETUP.md).
+
+### `takes Ns per call; N sections would need ~N minutes`
+
+Sectioned generation makes one LLM call per section, so a slow provider
+multiplies. CPU-only ollama measured over 10 minutes per call here, which is
+hours for a long script. The run times its outline call, projects the total and
+bails out rather than grinding.
+
+Fix it with a hosted key, or raise `content.section_time_budget_seconds` if you
+genuinely want to wait.
+
+### `provider dropped for this job`
+
+A visual provider was failing more than half its requests, so it was dropped
+for the remainder of the job. This is not an error - it is the alternative to
+paying ~15 seconds of backoff per scene to be refused anyway.
+
+Pollinations does this routinely at long-form scale: on a 63-scene job it
+refused 25 of 50 attempts. A free [Pexels](https://www.pexels.com/api/) or
+[Pixabay](https://pixabay.com/api/docs/) key avoids it and gives sharper
+images. Tune with `visuals.breaker_limit` and `visuals.breaker_failure_rate`.
+
+### `scene count capped`
+
+`content.max_scenes` (default 400) bounded the video, so each visual holds
+longer than the niche's pacing target. One scene costs one image plus one TTS
+call, so this is a cost ceiling rather than a quality one. Raise it if you want
+finer pacing on a very long video and can afford the render time.
+
+### The video is over 15 minutes and YouTube refused it
+
+YouTube caps uploads at 15 minutes until the channel is verified. Verifying is
+free: **Studio -> Settings -> Channel -> Feature eligibility -> Upload videos
+longer than 15 minutes.** After that the limit is 12 hours or 256 GB.
+
+Nothing in this project caps length - there is no text-to-video service in the
+chain. See [SERVICE_COSTS.md](SERVICE_COSTS.md) section 6a.
+
+### `clips pre-stitched into segments`
+
+Informational. Past `video.render_segment_max` clips (default 40) the final
+render is done in batches, because one ffmpeg call cannot take hundreds of
+inputs - Windows caps a command line at 32,767 characters. Cross-fading is
+duration-exact either way, so captions stay in sync. If you ever see
+`segment duration drifted` alongside it, that is worth reporting.
+
+### A long video came out noticeably off its target length
+
+Long-form re-synthesises the narration once drift passes
+`quality.longform_refit_pct` (7%). If it is still off, the script itself
+overran: check the `trimmed overlong script` line in the log for the word count
+against the target.
 
 ---
 

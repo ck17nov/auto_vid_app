@@ -9,7 +9,7 @@ from engine.core.models import ResearchVideo
 from engine.core.util import rfc3339, utc_now
 from engine.research.gaps import (cluster_videos, detect_angles, find_gaps,
                                   research_context_block, topic_label)
-from engine.research.scoring import (ctr_potential_score, engagement_score,
+from engine.research.scoring import (engagement_score,
                                      recency_score, score_all,
                                      title_pattern_score)
 

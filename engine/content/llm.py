@@ -103,24 +103,76 @@ def extract_json(text: str) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------
+# Model retirement
+# --------------------------------------------------------------------------
+# Hosted providers retire model IDs on their own schedule. This project shipped
+# with `gemini-2.0-flash`, which Google shut down on 2026-06-01; every script
+# request then failed with a 404 that looked like a broken API key. Treat
+# "this model is gone" as a recoverable condition and fall forward to the next
+# candidate, but never swallow a rate limit or an auth failure that way.
+_MODEL_RETIRED = re.compile(
+    r"(model[_ ]not[_ ]found|does not exist|is not found|not_found|"
+    r"decommissioned|discontinued|no longer (available|supported)|"
+    r"has been (shut down|retired|removed)|unsupported model|"
+    r"invalid model|unknown model)", re.I)
+
+
+def _is_model_retired(message: str) -> bool:
+    """True if the error means "that model ID is gone", not "you are throttled"."""
+    if re.search(r"\b(429|rate limit|quota|401|403|invalid api key|"
+                 r"permission denied)\b", message, re.I):
+        return False
+    return bool(_MODEL_RETIRED.search(message)) or " 404" in message
+
+
+# --------------------------------------------------------------------------
 # Groq
 # --------------------------------------------------------------------------
 class GroqProvider:
     name = "groq"
     ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
+    # Tried in order. Hosted model IDs get decommissioned with little notice,
+    # so a single hard-coded ID is a time bomb - see MODEL_RETIREMENT below.
+    FALLBACK_MODELS = [
+        "llama-3.3-70b-versatile",   # 131k context, best prose of the free set
+        "openai/gpt-oss-120b",       # 200k tokens/day on the free tier
+        "openai/gpt-oss-20b",
+        "llama-3.1-8b-instant",      # 500k tokens/day, weakest prose
+    ]
 
     def __init__(self, api_key: str = "", model: str = "", timeout: int = 120):
         self.api_key = api_key or os.environ.get("GROQ_API_KEY", "")
-        self.model = model or os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+        self.model = model or os.environ.get("GROQ_MODEL", "") or self.FALLBACK_MODELS[0]
         self.timeout = timeout
 
     def available(self) -> bool:
         return bool(self.api_key)
 
+    def _candidates(self) -> list[str]:
+        return [self.model] + [m for m in self.FALLBACK_MODELS if m != self.model]
+
     def complete(self, prompt: str, *, system: str = "", json_mode: bool = False,
                  temperature: float = 0.8, max_tokens: int = 4096) -> LLMResult:
+        last: LLMError | None = None
+        for model in self._candidates():
+            try:
+                result = self._call(model, prompt, system, json_mode,
+                                    temperature, max_tokens)
+            except LLMError as exc:
+                if not _is_model_retired(str(exc)):
+                    raise
+                log_event("LLM", "groq model unavailable, trying next",
+                          model=model, error=str(exc)[:140])
+                last = exc
+                continue
+            self.model = model          # stick with what worked
+            return result
+        raise last or LLMError("no usable groq model")
+
+    def _call(self, model: str, prompt: str, system: str, json_mode: bool,
+              temperature: float, max_tokens: int) -> LLMResult:
         payload: dict[str, Any] = {
-            "model": self.model,
+            "model": model,
             "messages": ([{"role": "system", "content": system}] if system else [])
                         + [{"role": "user", "content": prompt}],
             "temperature": temperature,
@@ -141,7 +193,7 @@ class GroqProvider:
             text = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError) as exc:
             raise LLMError(f"unexpected groq response shape: {exc}") from exc
-        return LLMResult(text=text, provider=self.name, model=self.model)
+        return LLMResult(text=text, provider=self.name, model=model)
 
 
 # --------------------------------------------------------------------------
@@ -150,17 +202,48 @@ class GroqProvider:
 class GeminiProvider:
     name = "gemini"
     BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+    # Google shut down gemini-2.0-flash on 2026-06-01. It was this project's
+    # original default, and the pipeline died with a 404 until the list below
+    # was introduced: never pin a single hosted model ID.
+    FALLBACK_MODELS = [
+        "gemini-3.7-flash",        # current stable Flash
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+        "gemini-3.5-flash-lite",   # cheapest/highest-volume
+        "gemini-2.5-flash",
+    ]
 
     def __init__(self, api_key: str = "", model: str = "", timeout: int = 120):
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY", "")
-        self.model = model or os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+        self.model = model or os.environ.get("GEMINI_MODEL", "") or self.FALLBACK_MODELS[0]
         self.timeout = timeout
 
     def available(self) -> bool:
         return bool(self.api_key)
 
+    def _candidates(self) -> list[str]:
+        return [self.model] + [m for m in self.FALLBACK_MODELS if m != self.model]
+
     def complete(self, prompt: str, *, system: str = "", json_mode: bool = False,
                  temperature: float = 0.8, max_tokens: int = 4096) -> LLMResult:
+        last: LLMError | None = None
+        for model in self._candidates():
+            try:
+                result = self._call(model, prompt, system, json_mode,
+                                    temperature, max_tokens)
+            except LLMError as exc:
+                if not _is_model_retired(str(exc)):
+                    raise
+                log_event("LLM", "gemini model unavailable, trying next",
+                          model=model, error=str(exc)[:140])
+                last = exc
+                continue
+            self.model = model          # stick with what worked
+            return result
+        raise last or LLMError("no usable gemini model")
+
+    def _call(self, model: str, prompt: str, system: str, json_mode: bool,
+              temperature: float, max_tokens: int) -> LLMResult:
         gen: dict[str, Any] = {"temperature": temperature,
                                "maxOutputTokens": max_tokens}
         if json_mode:
@@ -171,7 +254,7 @@ class GeminiProvider:
         }
         if system:
             payload["systemInstruction"] = {"parts": [{"text": system}]}
-        url = f"{self.BASE}/{self.model}:generateContent"
+        url = f"{self.BASE}/{model}:generateContent"
         with httpx.Client(timeout=self.timeout) as client:
             resp = client.post(url, json=payload,
                                headers={"x-goog-api-key": self.api_key,
@@ -187,7 +270,7 @@ class GeminiProvider:
         except (KeyError, IndexError) as exc:
             reason = str(data)[:200]
             raise LLMError(f"unexpected gemini response ({exc}): {reason}") from exc
-        return LLMResult(text=text, provider=self.name, model=self.model)
+        return LLMResult(text=text, provider=self.name, model=model)
 
 
 # --------------------------------------------------------------------------

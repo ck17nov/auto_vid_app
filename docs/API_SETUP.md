@@ -18,30 +18,64 @@ key — it is the one hard dependency besides FFmpeg.
 
 ### 2. Groq — best free script quality
 
-1. <https://console.groq.com/keys> — sign in, create an API key.
-2. In `.env`:
+1. Open <https://console.groq.com/keys> and sign in with Google, GitHub or
+   email. No credit card, no billing setup.
+2. **Create API Key** → give it a name → copy it **immediately**. Groq shows
+   the key exactly once; if you lose it, delete it and make another.
+3. Put it in `.env` (not in `config.yaml`, which is committed):
 
    ```
    GROQ_API_KEY=gsk_...
-   GROQ_MODEL=llama-3.3-70b-versatile
    ```
 
-No credit card. The free tier has per-minute and per-day limits that are ample
-for a few videos a day. If a limit is hit, the router falls through to the next
-provider automatically and logs which one answered.
+   `GROQ_MODEL` is optional — leave it unset and the provider picks the best
+   free model and falls forward if that ID is retired.
+4. Verify:
+
+   ```bash
+   .venv/Scripts/python -m backend.cli doctor
+   ```
+
+Free-tier limits are **per organisation**, not per key, so extra keys do not
+add quota. Verified 2026-08:
+
+| Model | Req/min | Req/day | Tokens/min | Tokens/day |
+|---|---:|---:|---:|---:|
+| `llama-3.3-70b-versatile` (default) | 30 | 1,000 | 12,000 | 100,000 |
+| `openai/gpt-oss-120b` | 30 | 1,000 | 8,000 | 200,000 |
+| `llama-3.1-8b-instant` | 30 | 14,400 | 6,000 | 500,000 |
+
+You hit whichever limit comes first. If one is reached, the router falls
+through to the next provider automatically and logs which one answered.
+
+**For long-form, Gemini is the better primary.** A 20-minute script costs
+roughly 25,000 tokens across ~14 sectioned calls, so Groq's 100,000 tokens/day
+on the 70B model allows about four long videos a day; Gemini's Flash tier is
+considerably more generous.
 
 ### 3. Google Gemini — fallback
 
-1. <https://aistudio.google.com/apikey> — create an API key.
+1. <https://aistudio.google.com/apikey> — **Create API key**. Pick or create a
+   Google Cloud project when asked; you do not need to enable billing.
 2. In `.env`:
 
    ```
    GEMINI_API_KEY=AIza...
-   GEMINI_MODEL=gemini-2.0-flash
    ```
 
-No credit card for AI Studio keys. Note that free-tier prompts may be used by
-Google to improve their products, so do not send anything confidential.
+   Leave `GEMINI_MODEL` unset unless you have a reason: the provider defaults
+   to `gemini-3.7-flash` and falls back through 3.6 / 3.5 / 3.5-lite / 2.5.
+3. Check your actual limits at <https://aistudio.google.com/rate-limit>.
+   Roughly 1,500 requests/day on Flash, 15/minute.
+
+No credit card for AI Studio keys. Rate limits are **per project**, not per key.
+Note that free-tier prompts may be used by Google to improve their products, so
+do not send anything confidential.
+
+> **Do not pin a model ID you have not checked.** This project shipped with
+> `gemini-2.0-flash`, which Google shut down on 2026-06-01. Every script
+> request then failed with a 404 that read like an invalid API key. If you set
+> `GEMINI_MODEL` or `GROQ_MODEL` by hand, you take on that maintenance.
 
 ---
 

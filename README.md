@@ -148,6 +148,41 @@ appears only for your own authenticated channel.
 **Approval mode is the default.** Auto mode is opt-in, and the quality gate's
 hard blockers apply in both.
 
+**Long videos are built section by section.** A 20-minute script is ~3,100
+words, which does not fit in one free-tier LLM response - it gets truncated
+mid-JSON. Past `content.section_threshold` scenes the pipeline plans an outline
+first, then writes one section per call, each given the headings already covered
+so it cannot repeat itself. The section headings become the YouTube chapters.
+
+**Nothing generates video, so nothing caps its length.** Visuals are stills plus
+Ken Burns motion composed by FFmpeg on your machine. There is no text-to-video
+service in the chain to impose a 10-second clip limit or a monthly credit
+budget - see [docs/SERVICE_COSTS.md](docs/SERVICE_COSTS.md#6a-free-unlimited-ai-video-generation--what-is-actually-true).
+
+**Never pin a hosted model ID.** This project shipped with `gemini-2.0-flash`;
+Google shut it down on 2026-06-01 and every script request began failing with a
+404 that read like a bad API key. Both LLM providers now carry a fallback list
+and fall forward when a model is retired.
+
+---
+
+## Video length
+
+| | |
+|---|---|
+| Rendering | no limit - bounded by CPU time only |
+| YouTube, unverified account | **15 minutes.** This is the real ceiling for most people |
+| YouTube, verified account | 12 hours / 256 GB |
+| Scenes per video | `content.max_scenes`, default 400 (one scene = one image + one TTS call) |
+| Script generation | free-tier tokens/day; roughly 4 long videos/day |
+
+Lifting the 15-minute cap is free: **YouTube Studio → Settings → Channel →
+Feature eligibility → Upload videos longer than 15 minutes.**
+
+```bash
+.venv/Scripts/python -m backend.cli run --niche "history" --length 600 --format LONGFORM --dry-run
+```
+
 ---
 
 ## Status
@@ -156,11 +191,11 @@ Verified on this machine (Windows 11, Python 3.12, FFmpeg 9.0, JDK 17, Android S
 
 | Area | State |
 |---|---|
-| Engine: research -> script -> voice -> visuals -> render -> quality | Run end-to-end, twice, with every artifact verified |
-| Python test suite | **303 tests passing** |
+| Engine: research -> script -> voice -> visuals -> render -> quality | Run end-to-end on Shorts and on a 4-minute long-form video, every artifact verified |
+| Python test suite | **352 tests passing** |
 | Static analysis | pyflakes clean (bar 3 documented import-probes) |
 | Backend API + CLI | 18 endpoints, `doctor` / `run` / `research` / `quota` exercised |
-| Android app | **Compiles and packages: 23.8 MB debug APK** (`com.autotube.ai.debug`, minSdk 26, targetSdk 35) |
+| Android app | **Compiles and packages: 24.0 MB debug APK** (`com.autotube.ai.debug`, minSdk 26, targetSdk 35) |
 | YouTube upload + analytics | Implemented against the official APIs; needs your OAuth credentials to exercise for real |
 
 ### What an end-to-end run actually produced
@@ -183,11 +218,44 @@ approval mode is the default.
 With a Groq key (free) the scripts are written by Llama 3.3 70B instead of the
 template builder, which is the single biggest quality difference available.
 
+### And a long-form run
+
+240s, 16:9, `history`. The LLM was **stubbed** (`scripts/longform_e2e.py`) so
+the sectioned assembly, TTS, visuals, captions and batched render could be
+verified without a key; script *quality* still needs a real model.
+
+| | |
+|---|---|
+| Script | 12 sections from 1 outline call + 12 section calls, 0 degraded |
+| Scenes | 63 (one image and one TTS call each) |
+| Chapters | 12, from the outline's real section headings |
+| Render | 5 pre-stitch segments, **0 duration-drift warnings** |
+| Output | 1920x1080 h264, limited-range BT.709, 147 MB (4.6 Mbps) |
+| Audio | -14.00 LUFS / -2.65 dBTP |
+| Captions | 161 karaoke groups across 610 words |
+| Quality | 93.3/100 |
+| Wall clock | **64.7 min for a 4-minute video** (~16x realtime) |
+| Visuals | 25 real AI images, 38 procedural, after the rate-limit breaker fired |
+| Verdict | **REJECTED** - correctly, because it was the third identical stub run and the self-similarity check caught it |
+
+That rejection is the system working. The duplicate check compares each new
+script against your own history, and three identical runs is exactly what it
+exists to stop.
+
 ### Known limits, stated plainly
 
 - **~4-5 uploads/day** on a default YouTube quota. Hard ceiling, not a bug.
-- **Render time** is a few minutes of CPU per 45s Short, and much worse under
-  contention. This is why rendering is not on the phone.
+- **YouTube refuses videos over 15 minutes** until your channel is verified.
+  Verifying is free and takes a minute; the app warns you above 15 minutes.
+- **Long-form needs an LLM key.** The template builder cannot honestly fill
+  more than about two minutes of narration, and `doctor` says so up front
+  rather than letting you find out after an hour of rendering.
+- **Render time is roughly 15x realtime** on a laptop - measured: 64.7 minutes
+  for a 4-minute video. This is why rendering is not on the phone.
+- **Free image endpoints rate-limit hard at long-form scale.** Pollinations
+  refused half the requests on a 63-scene job; a breaker drops a provider once
+  it is failing more than half the time, so the job stops paying backoff. A
+  free Pexels or Pixabay key avoids this entirely and looks better.
 - **edge-tts is an unofficial endpoint.** It broke once during this build (403
   on 7.0.0) and needed a version bump. Piper is the licence-clean fallback.
 - **Free AI images cap near 576x1024**, so they are upscaled and look softer

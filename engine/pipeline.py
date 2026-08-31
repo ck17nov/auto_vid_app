@@ -145,13 +145,35 @@ class Pipeline:
                 "ffmpeg/ffprobe not found on PATH - required for rendering. "
                 "See docs/SETUP.md")
         if not self.research_engine.configured:
-            problems.append(
-                "YOUTUBE_API_KEY not set - research cannot run "
-                "(free, no credit card: docs/YOUTUBE_SETUP.md)")
+            message = ("YOUTUBE_API_KEY not set - research cannot run "
+                       "(free, no credit card: docs/YOUTUBE_SETUP.md)")
+            if self.cfg.dry_run:
+                # Spec section 36 wants a dry run to produce every artifact.
+                # Blocking here meant you could not see what the pipeline
+                # makes until after signing up for an API key - so in dry run
+                # this degrades loudly instead. Ideas then come from the
+                # structural builder, with no trend evidence behind them.
+                log_event("PREFLIGHT", "dry run without research",
+                          reason=message,
+                          effect="ideas will be structural, not trend-driven")
+            else:
+                problems.append(message)
         if not self.router.has_real_llm():
             log_event("PREFLIGHT", "no LLM configured - script quality will be "
                                    "degraded to the template builder",
                       hint="set GROQ_API_KEY or GEMINI_API_KEY, or run ollama")
+            # The template builder assembles framing lines, and there are only
+            # so many honest ones - it tops out around 200 words. That is a
+            # whole 45s Short but nowhere near a 10-minute video, and the gap
+            # would be papered over by slowing the narration until it failed
+            # the duration check after the full render. Say so first instead.
+            if request.duration_seconds > 120:
+                problems.append(
+                    f"a {request.duration_seconds}s video needs a real LLM: the "
+                    f"template builder cannot honestly fill more than about "
+                    f"two minutes of narration without repeating itself. Set "
+                    f"GROQ_API_KEY or GEMINI_API_KEY (both free, no credit "
+                    f"card - docs/API_SETUP.md), or request a shorter video.")
 
         limit = int(self.cfg.get("automation.daily_video_limit", 3))
         since = time.time() - 86400
@@ -201,12 +223,20 @@ class Pipeline:
     def stage_research(self, job: VideoJob, request: AutomationRequest,
                       profile) -> list[ResearchVideo]:
         self._advance(job, JobStatus.RESEARCH, f"niche={request.niche}")
-        videos = self._retry("research", lambda: self.research_engine.research(
-            request.niche, profile, video_format=request.video_format,
-            extra_keywords=request.keywords), job)
+        skipped = ""
+        if not self.research_engine.configured and self.cfg.dry_run:
+            # Preflight already logged why. Record it in the artifact too, so a
+            # dry-run job folder never looks like a real research run.
+            skipped = "YOUTUBE_API_KEY not set; dry run continued without trends"
+            videos: list[ResearchVideo] = []
+        else:
+            videos = self._retry("research", lambda: self.research_engine.research(
+                request.niche, profile, video_format=request.video_format,
+                extra_keywords=request.keywords), job)
         safe_write_json(Path(job.dir) / "research.json",
                         {"niche": request.niche,
                          "count": len(videos),
+                         "skipped": skipped,
                          "quota_used_today": self.quota.used(),
                          "videos": [v.to_dict() for v in videos]})
         return videos
@@ -290,7 +320,14 @@ class Pipeline:
         target = float(request.duration_seconds)
         tolerance = float(self.cfg.get("quality.duration_tolerance_pct", 25)) / 100.0
         drift = (total - target) / target if target > 0 else 0.0
-        if abs(drift) > tolerance * 0.8:
+        # Long-form gets a much tighter trigger. On a 45s Short, re-synthesising
+        # costs a meaningful share of the whole job, so it is only worth doing
+        # for a real miss. On a 4-minute video the extra TTS pass is about 4 of
+        # 65 minutes, and the looser trigger left a measured 6.7% error - 16
+        # seconds of drift on a video whose length was requested precisely.
+        trigger = (tolerance * 0.8 if request.video_format != "LONGFORM"
+                   else float(self.cfg.get("quality.longform_refit_pct", 7)) / 100.0)
+        if abs(drift) > trigger:
             # Correct the speaking rate rather than shipping a mistimed video.
             # edge-tts rate is a percentage delta on the base speed.
             base = _parse_rate(spec.rate)
@@ -392,6 +429,7 @@ class Pipeline:
         cleanup_clips(clips)
 
         job.video_path = str(result.video)
+        target = float(request.duration_seconds)
         safe_write_json(job_dir / "render_report.json", {
             "duration": result.duration, "resolution": f"{w}x{h}",
             "fps": result.fps, "caption_groups": groups,
@@ -400,6 +438,15 @@ class Pipeline:
             "audio_true_peak": audio_stats.get("input_tp"),
             "scene_count": len(timings),
             "motions": [t.motion for t in timings],
+            # Recorded so the artifact is self-describing: "42.8s" means
+            # nothing without knowing what was asked for.
+            "video_format": request.video_format,
+            "target_duration": target,
+            "duration_error_pct": (round((result.duration - target) / target * 100, 1)
+                                   if target > 0 else None),
+            "batched_render": len(timings) > self.composer.segment_max,
+            "segments": (-(-len(timings) // self.composer.segment_max)
+                         if len(timings) > self.composer.segment_max else 1),
         })
         self.db.save_job(job)
         return result.video

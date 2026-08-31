@@ -236,13 +236,34 @@ fun CreateAutomationScreen(onStarted: () -> Unit) {
         Slider(
             value = lengthSeconds.toFloat(),
             onValueChange = { lengthSeconds = it.roundToInt() },
-            valueRange = if (isShort) 15f..180f else 120f..900f,
-            steps = if (isShort) 32 else 25,
+            // Long-form goes to the backend's own ceiling (3600s). Nothing in
+            // the pipeline generates video, so length is not capped by a
+            // service - only by YouTube's account limits and render time.
+            valueRange = if (isShort) 15f..180f else 120f..3600f,
+            steps = if (isShort) 32 else 57,
         )
         if (isShort && lengthSeconds > 60) {
             Text(
                 "Shorts up to 3 minutes are supported by YouTube, but 30-60s " +
                     "usually retains best.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (!isShort && lengthSeconds > 900) {
+            Text(
+                "Over 15 minutes needs a verified YouTube account: Studio -> " +
+                    "Settings -> Channel -> Feature eligibility. It is free. " +
+                    "Unverified channels are refused at upload, not here.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+        if (!isShort) {
+            Text(
+                "Long-form needs an LLM key on the backend (Groq or Gemini, " +
+                    "both free). Roughly ${estimateRenderMinutes(lengthSeconds)} " +
+                    "minutes of render time on a laptop.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -420,3 +441,15 @@ fun CreateAutomationScreen(onStarted: () -> Unit) {
 
 private fun formatLength(seconds: Int): String =
     if (seconds >= 60) "${seconds / 60}m ${seconds % 60}s" else "${seconds}s"
+
+/**
+ * Rough render-time estimate.
+ *
+ * Measured end to end on the dev laptop: a 240-second long-form video took
+ * about 62 minutes, i.e. roughly 15x realtime. The final encode and the
+ * per-scene clips dominate; image generation adds more when a free provider
+ * is rate limiting. Showing a number here stops a 20-minute request looking
+ * like a hang. A machine with a GPU or more cores will beat it comfortably.
+ */
+private fun estimateRenderMinutes(seconds: Int): Int =
+    ((seconds * 15.0) / 60).toInt().coerceAtLeast(2)

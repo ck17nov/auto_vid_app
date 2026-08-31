@@ -56,6 +56,20 @@ content:
   llm_provider_order: [groq, gemini, ollama, template]
   temperature: 0.85
   max_ideas: 10
+  # One scene = one visual = one TTS call, so this bounds the cost of a single
+  # video, not its length. 400 scenes is roughly a 30-minute video at normal
+  # pacing. Raise it for longer videos; render time scales with it.
+  max_scenes: 400
+  # Above this many scenes the script is written section by section instead of
+  # in one LLM call. A 3,000-word script does not fit in a single free-tier
+  # response (6k-12k tokens/minute) and gets truncated mid-JSON.
+  section_threshold: 20
+  scenes_per_section: 10
+  # Sectioned generation makes one LLM call per section, so a slow provider
+  # multiplies. CPU-only ollama was measured at >10 min/call here: 14 sections
+  # would be hours. The outline call is timed and the run bails out if the
+  # projection exceeds this.
+  section_time_budget_seconds: 600
   fact_check_required_niches: [science, technology, finance, health, history, space, news]
 
 tts:
@@ -84,6 +98,13 @@ visuals:
   parallel: 2
   transient_retries: 3
   retry_backoff_seconds: 5
+  # Drop a provider for the rest of the job once it has failed this many
+  # scenes AND at least this share of its attempts. Rate limiting is global to
+  # the provider, not per scene: on a 71-scene video, retrying each scene cost
+  # ~15s of backoff to be refused anyway. Pollinations measured ~50% refusals
+  # under this load, which is why the trigger is a rate and not a streak.
+  breaker_limit: 3
+  breaker_failure_rate: 0.5
 
 video:
   default_resolution: 1080x1920
@@ -100,6 +121,11 @@ video:
   sfx_volume_db: -4
   transition: fade
   transition_duration: 0.35
+  # Clips per pre-stitch batch in the final render. One ffmpeg call cannot take
+  # hundreds of inputs (Windows caps a command line at 32,767 chars), so long
+  # videos are stitched in batches first. Cross-fading is duration-exact either
+  # way, so captions stay in sync.
+  render_segment_max: 40
   kenburns: true
   hardware_accel: auto           # auto | none | nvenc | qsv | amf
   # Named style template (spec section 45). Leave empty to auto-select from
@@ -129,6 +155,11 @@ quality:
   max_silence_seconds: 1.6
   min_audio_rms_db: -40.0
   duration_tolerance_pct: 25
+  # Long-form re-synthesises the narration at a corrected rate once drift
+  # exceeds this. Much tighter than the Short trigger because the extra TTS
+  # pass is a small share of a long render, and a measured 6.7% miss on a
+  # 4-minute video is 16 seconds of drift.
+  longform_refit_pct: 7
 
 originality:
   # Max 4-gram Jaccard similarity allowed against any researched text.

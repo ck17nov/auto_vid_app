@@ -15,6 +15,7 @@ from paraphrasing any single source (spec section 7).
 from __future__ import annotations
 
 import re
+import time
 from typing import Any
 
 from ..core.config import Config
@@ -58,11 +59,27 @@ it in the claims array with a lower confidence.
 - Output valid JSON only."""
 
 
-def _budget(profile: NicheProfile, duration: int) -> tuple[int, int, int]:
+# One scene == one visual, so this is really a cap on how many images and TTS
+# calls a single video may cost. It used to be a flat 24, which silently turned
+# any long-form request into a slideshow: a 10-minute video got 24 scenes, i.e.
+# one static image held for 25 seconds. The cap now only exists to bound cost,
+# and it is high enough that pacing is decided by the niche profile instead.
+DEFAULT_MAX_SCENES = 400
+
+
+def _budget(profile: NicheProfile, duration: int, *,
+            max_scenes: int = DEFAULT_MAX_SCENES) -> tuple[int, int, int]:
     """Return (target_words, min_words, scene_count)."""
     wps = max(profile.words_per_second, 1.2)
     target = int(duration * wps)
-    scenes = max(3, min(int(round(duration / max(profile.scene_seconds, 1.5))), 24))
+    ideal = int(round(duration / max(profile.scene_seconds, 1.5)))
+    ceiling = max_scenes if max_scenes > 0 else DEFAULT_MAX_SCENES
+    scenes = max(3, min(ideal, ceiling))
+    if ideal > ceiling:
+        log_event("SCRIPT", "scene count capped; visuals will hold longer "
+                            "than the niche pacing target",
+                  wanted=ideal, cap=ceiling,
+                  seconds_per_scene=f"{duration / scenes:.1f}")
     return target, int(target * 0.82), scenes
 
 
@@ -103,23 +120,40 @@ class ScriptGenerator:
                  research_context: str = "",
                  strategy_hints: str = "") -> Script:
         is_short = video_format != "LONGFORM"
-        target_words, min_words, scene_count = _budget(profile, duration)
+        target_words, min_words, scene_count = _budget(
+            profile, duration,
+            max_scenes=int(self.cfg.get("content.max_scenes", DEFAULT_MAX_SCENES)))
         structure = _structure(duration, is_short)
 
-        prompt = self._build_prompt(
-            idea, profile, duration, language, is_short, target_words,
-            scene_count, structure, research_context, strategy_hints)
+        # A single JSON response cannot carry a 3,000-word script: free-tier
+        # per-minute token limits (6k-12k TPM) cut it off mid-array, and even
+        # when it fits the model thins out the middle. Past this size the script
+        # is built section by section instead - see _generate_sectioned.
+        section_threshold = int(self.cfg.get("content.section_threshold", 20))
+        script: Script | None = None
+        if scene_count > section_threshold:
+            try:
+                script = self._generate_sectioned(
+                    idea, profile, duration, language, target_words,
+                    scene_count, structure, research_context, strategy_hints)
+            except LLMError as exc:
+                log_event("SCRIPT", "sectioned generation failed",
+                          error=str(exc)[:180])
 
-        try:
-            data, provider = self.router.complete_json(
-                prompt, system=SYSTEM_PROMPT, temperature=self.temperature,
-                max_tokens=4096 if is_short else 8192)
-            script = self._parse(data, idea, profile, language, provider)
-        except LLMError as exc:
-            log_event("SCRIPT", "LLM unavailable, using deterministic builder",
-                      error=str(exc)[:180])
-            script = build_template_script(
-                idea, profile, duration, language, structure, target_words)
+        if script is None:
+            prompt = self._build_prompt(
+                idea, profile, duration, language, is_short, target_words,
+                scene_count, structure, research_context, strategy_hints)
+            try:
+                data, provider = self.router.complete_json(
+                    prompt, system=SYSTEM_PROMPT, temperature=self.temperature,
+                    max_tokens=4096 if is_short else 8192)
+                script = self._parse(data, idea, profile, language, provider)
+            except LLMError as exc:
+                log_event("SCRIPT", "LLM unavailable, using deterministic builder",
+                          error=str(exc)[:180])
+                script = build_template_script(
+                    idea, profile, duration, language, structure, target_words)
 
         script = self._post_process(script, profile, target_words, min_words,
                                     duration, is_short)
@@ -128,6 +162,278 @@ class ScriptGenerator:
                   target_words=target_words,
                   est_seconds=f"{script.estimated_duration:.1f}")
         return script
+
+    # ------------------------------------------------------------------
+    def _generate_sectioned(self, idea: ContentIdea, profile: NicheProfile,
+                            duration: int, language: str, target_words: int,
+                            scene_count: int,
+                            structure: list[tuple[str, str, float]],
+                            research_context: str,
+                            strategy_hints: str) -> Script:
+        """Build a long script as an outline plus one LLM call per section.
+
+        This is what makes long-form possible on a free tier at all. Asking for
+        a 3,000-word script in one response fails two ways: the reply exceeds
+        the free per-minute token limit and gets truncated mid-JSON, and models
+        that do fit it pad the middle with restatement.
+
+        Each section call is small (roughly 250 words of narration), so it fits
+        comfortably inside a 6k-12k tokens/minute budget, and each one is given
+        the headings already covered so it does not repeat them.
+
+        A section that fails is filled from the deterministic builder rather
+        than aborting the whole script - one weak stretch in a 20-minute video
+        is recoverable, losing the video is not.
+        """
+        per_section = max(6, min(12, int(self.cfg.get("content.scenes_per_section", 10))))
+        section_count = max(2, min(60, int(round(scene_count / per_section))))
+
+        # Sectioned generation multiplies whatever one call costs by the number
+        # of sections. That is fine for a hosted model at 2-5s per call and
+        # ruinous for CPU-only ollama, which was measured at over 10 minutes
+        # per call on this project's dev machine - 14 sections would be hours.
+        # The outline call is timed and used as the estimate.
+        budget = float(self.cfg.get("content.section_time_budget_seconds", 600))
+        started = time.monotonic()
+        outline, provider = self._outline(
+            idea, profile, duration, language, target_words, section_count,
+            structure, research_context, strategy_hints)
+        outline_seconds = time.monotonic() - started
+        projected = outline_seconds * section_count
+        if projected > budget:
+            raise LLMError(
+                f"{provider} takes {outline_seconds:.0f}s per call; "
+                f"{section_count} sections would need ~{projected / 60:.0f} "
+                f"minutes (budget {budget / 60:.0f}). Set GROQ_API_KEY or "
+                f"GEMINI_API_KEY for long-form, or raise "
+                f"content.section_time_budget_seconds.")
+
+        sections = [s for s in (outline.get("sections") or []) if isinstance(s, dict)]
+        if not sections:
+            raise LLMError("outline contained no sections")
+
+        # Distribute the scene budget across the sections the model actually
+        # returned, not the number we asked for.
+        scenes_each = _spread(scene_count, len(sections))
+        words_each = _spread(target_words, len(sections))
+
+        all_scenes: list[Scene] = []
+        all_claims: list[dict[str, Any]] = []
+        chapters: list[dict[str, Any]] = []
+        covered: list[str] = []
+        degraded = 0
+
+        for i, section in enumerate(sections):
+            heading = str(section.get("heading") or f"Part {i + 1}").strip()
+            role_hint = ("hook" if i == 0 else
+                         "payoff" if i == len(sections) - 1 else "value")
+            chapters.append({"heading": truncate(heading, 42),
+                             "scene_index": len(all_scenes)})
+            if time.monotonic() - started > budget:
+                # The per-call estimate was optimistic. Fill the rest rather
+                # than run for hours; the sections written so far are real.
+                degraded += 1
+                log_event("SCRIPT", "time budget spent, filling remaining "
+                                    "sections deterministically",
+                          section=i, of=len(sections),
+                          elapsed=f"{time.monotonic() - started:.0f}s")
+                all_scenes += _template_section(
+                    idea, profile, heading, role_hint, scenes_each[i],
+                    words_each[i], len(all_scenes))
+                covered.append(heading)
+                continue
+            try:
+                data, _ = self.router.complete_json(
+                    self._section_prompt(
+                        idea, profile, language, outline, section, heading,
+                        role_hint, scenes_each[i], words_each[i], covered,
+                        research_context, i == 0, i == len(sections) - 1),
+                    system=SYSTEM_PROMPT, temperature=self.temperature,
+                    max_tokens=2048)
+                got = self._parse_scenes(data.get("scenes") or [], len(all_scenes))
+                if not got:
+                    raise LLMError(f"section {i} produced no scenes")
+                all_claims += [c for c in (data.get("claims") or [])
+                               if isinstance(c, dict)]
+            except LLMError as exc:
+                degraded += 1
+                log_event("SCRIPT", "section fell back to template",
+                          section=i, heading=heading, error=str(exc)[:140])
+                got = _template_section(
+                    idea, profile, heading, role_hint, scenes_each[i],
+                    words_each[i], len(all_scenes))
+            all_scenes += got
+            covered.append(heading)
+
+        if not all_scenes:
+            raise LLMError("no scenes across any section")
+
+        titles = [str(t).strip() for t in (outline.get("title_ideas") or [])
+                  if str(t).strip()]
+        label = provider if not degraded else f"{provider}+template"
+        log_event("SCRIPT", "sectioned script assembled",
+                  sections=len(sections), degraded=degraded,
+                  scenes=len(all_scenes),
+                  words=sum(count_words(s.narration) for s in all_scenes),
+                  target_words=target_words, provider=label)
+
+        return Script(
+            idea_id=idea.idea_id,
+            title_ideas=titles[:10],
+            hook=str(outline.get("hook") or all_scenes[0].narration).strip(),
+            script=" ".join(s.narration for s in all_scenes),
+            scenes=[s.to_dict() for s in all_scenes],
+            visual_plan=[s.visual_prompt for s in all_scenes],
+            voice_style=str(outline.get("voice_style") or "energetic").lower(),
+            cta=str(outline.get("cta") or "").strip(),
+            language=language,
+            chapters=chapters,
+            claims=all_claims[:40],
+            sources=[{"title": str(s.get("title", "")), "note": str(s.get("note", ""))}
+                     for s in (outline.get("sources") or [])
+                     if isinstance(s, dict)][:12],
+            provider=label,
+        )
+
+    # ------------------------------------------------------------------
+    def _outline(self, idea: ContentIdea, profile: NicheProfile, duration: int,
+                 language: str, target_words: int, section_count: int,
+                 structure: list[tuple[str, str, float]],
+                 research_context: str,
+                 strategy_hints: str) -> tuple[dict[str, Any], str]:
+        beats = "\n".join(f"- {role.upper()} (~{int(frac * duration)}s): {purpose}"
+                          for role, purpose, frac in structure)
+        minutes = duration / 60.0
+        prompt = f"""Plan an original {minutes:.0f}-minute YouTube video.
+
+{profile.prompt_block()}
+
+CONCEPT (already validated - do not change the topic):
+  Topic: {idea.topic}
+  Angle: {idea.angle}
+  Hook concept: {idea.hook_concept}
+
+Total narration will be about {target_words} words. Break the body into exactly
+{section_count} sections. Each section must advance a DIFFERENT idea - no
+section may restate another. Give each 2-4 concrete key points that the writer
+can turn into narration; a key point must be specific, not a topic label.
+
+OVERALL SHAPE:
+{beats}
+
+{research_context or 'No external research was available; stay with widely established facts only.'}
+
+{strategy_hints}
+
+Return this exact JSON shape and nothing else:
+{{
+  "title_ideas": ["8-12 words each, 5 options, no ALL CAPS, no false claims"],
+  "hook": "the first sentence of the video, max 14 words",
+  "voice_style": "energetic|calm|serious|storytelling|excited|gentle",
+  "cta": "one specific next action",
+  "sections": [
+    {{"heading": "3-6 words",
+      "purpose": "what this section does for the viewer",
+      "key_points": ["specific point", "specific point"]}}
+  ],
+  "sources": [{{"title": "", "note": "what it supports"}}]
+}}"""
+        return self.router.complete_json(
+            prompt, system=SYSTEM_PROMPT, temperature=self.temperature,
+            max_tokens=3072)
+
+    # ------------------------------------------------------------------
+    def _section_prompt(self, idea: ContentIdea, profile: NicheProfile,
+                        language: str, outline: dict[str, Any],
+                        section: dict[str, Any], heading: str, role_hint: str,
+                        scenes: int, words: int, covered: list[str],
+                        research_context: str, is_first: bool,
+                        is_last: bool) -> str:
+        points = section.get("key_points") or []
+        if isinstance(points, str):
+            points = [points]
+        point_lines = "\n".join(f"  - {str(p).strip()}" for p in points) or "  - (none given)"
+        already = ("\nSECTIONS ALREADY WRITTEN (do not repeat these):\n"
+                   + "\n".join(f"  - {c}" for c in covered)) if covered else ""
+        lang_line = ("Write the narration in English."
+                     if language.startswith("en") else
+                     f"Write the narration in this language code: {language}. "
+                     f"Natural native phrasing, not translated English.")
+        kids_line = ""
+        if profile.made_for_kids:
+            kids_line = ("\nTHIS IS CHILD-DIRECTED CONTENT. Simple words, one "
+                         "idea per sentence, warm and calm. Nothing scary.\n")
+        edge = ""
+        if is_first:
+            edge = (f"\nThis is the OPENING. Scene 1 must be the hook, stated "
+                    f"cold: \"{outline.get('hook', '')}\". No greeting, no "
+                    f"channel intro, no \"in this video\".\n")
+        elif is_last:
+            edge = (f"\nThis is the CLOSING. Resolve the opening hook, then end "
+                    f"with this call to action: \"{outline.get('cta', '')}\".\n")
+
+        return f"""Write ONE SECTION of an existing video script.
+
+VIDEO TOPIC: {idea.topic}
+VIDEO ANGLE: {idea.angle}
+SECTION: {heading}
+SECTION PURPOSE: {section.get('purpose', '')}
+KEY POINTS TO COVER:
+{point_lines}
+{already}{edge}{kids_line}
+{lang_line}
+
+LENGTH IS A HARD CONSTRAINT:
+  This section is {words} words of narration (+/- 10%), split into exactly
+  {scenes} scenes of roughly equal spoken length - about {max(1, round(words / max(scenes, 1)))}
+  words per scene. Count the words. Both numbers matter: a section that hits
+  the scene count with twice the words makes the video overrun and forces
+  whole scenes to be cut back out.
+
+Write only this section. Do not summarise the video, do not introduce yourself,
+do not preview what comes later. Continue as if mid-sentence in a longer piece.
+Predominant scene role: {role_hint}.
+
+VISUALS: for each scene give a `visual_prompt` describing ONE image - a literal,
+photographable subject, camera framing and lighting. No text, no words, no logos
+in the image. Also give 2-4 `visual_keywords` (plain nouns).
+
+Return this exact JSON shape and nothing else:
+{{
+  "scenes": [
+    {{"role": "hook|context|promise|value|payoff|cta",
+      "narration": "spoken words only",
+      "visual_prompt": "one image description",
+      "visual_keywords": ["noun", "noun"],
+      "on_screen_text": ""}}
+  ],
+  "claims": [{{"claim": "", "confidence": "high|medium|low", "basis": ""}}]
+}}"""
+
+    # ------------------------------------------------------------------
+    def _parse_scenes(self, raw: Any, start_index: int) -> list[Scene]:
+        """Turn a raw `scenes` array into Scene objects, skipping junk."""
+        out: list[Scene] = []
+        if not isinstance(raw, list):
+            return out
+        for s in raw:
+            if not isinstance(s, dict):
+                continue
+            narration = str(s.get("narration") or "").strip()
+            if not narration:
+                continue
+            kws = s.get("visual_keywords") or []
+            if isinstance(kws, str):
+                kws = [k.strip() for k in kws.split(",") if k.strip()]
+            out.append(Scene(
+                index=start_index + len(out),
+                narration=narration,
+                visual_prompt=str(s.get("visual_prompt") or narration).strip(),
+                visual_keywords=[str(k) for k in kws][:5],
+                on_screen_text=truncate(str(s.get("on_screen_text") or ""), 28),
+                role=str(s.get("role") or "value").lower(),
+            ))
+        return out
 
     # ------------------------------------------------------------------
     def _build_prompt(self, idea: ContentIdea, profile: NicheProfile,
@@ -255,6 +561,10 @@ Return this exact JSON shape:
                       target_words: int, min_words: int, duration: int,
                       is_short: bool) -> Script:
         scenes = script.scene_objects()
+        # Chapters reference scenes by index, and the steps below renumber and
+        # can delete scenes. Track object identity so the headings still point
+        # at the right scene afterwards instead of drifting.
+        orig_index_by_id = {id(s): s.index for s in scenes}
 
         # 1. Strip banned openers from the very first scene.
         if scenes:
@@ -276,13 +586,27 @@ Return this exact JSON shape:
             if profile.visual_style and profile.visual_style not in s.visual_prompt:
                 s.visual_prompt = f"{s.visual_prompt}, {profile.visual_style}"
 
-        # 3. Trim to the word budget if the model overran badly.
+        # 3. Trim to the word budget if the model overran.
+        #
+        # The threshold differs by format, and deliberately so. On a 45s Short
+        # a scene is a large fraction of the video, so it is better to absorb a
+        # moderate overrun by speaking slightly faster than to delete content.
+        # On a 4-minute video a scene is ~3% of the whole and there are dozens,
+        # so trimming is cheap - and leaving it to the speaking rate is not:
+        # a 17% word overrun measured here forced a +31% delivery rate, which
+        # sounds rushed. Trim first, let the rate make the fine correction.
+        trigger, ceiling = (1.28, 1.12) if is_short else (1.08, 1.02)
         words_total = sum(count_words(s.narration) for s in scenes)
-        if words_total > target_words * 1.28 and len(scenes) > 3:
-            scenes = _trim_to_budget(scenes, int(target_words * 1.12))
+        if words_total > target_words * trigger and len(scenes) > 3:
+            scenes = _trim_to_budget(scenes, int(target_words * ceiling))
             log_event("SCRIPT", "trimmed overlong script",
                       from_words=words_total,
-                      to_words=sum(count_words(s.narration) for s in scenes))
+                      to_words=sum(count_words(s.narration) for s in scenes),
+                      target=target_words)
+
+        if script.chapters:
+            script.chapters = _remap_chapters(
+                script.chapters, scenes, orig_index_by_id)
 
         script.scenes = [s.to_dict() for s in scenes]
         script.script = " ".join(s.narration for s in scenes)
@@ -292,6 +616,96 @@ Return this exact JSON shape:
         script.estimated_duration = round(
             count_words(script.script) / max(profile.words_per_second, 1.2), 2)
         return script
+
+
+def _remap_chapters(chapters: list[dict[str, Any]], scenes: list[Scene],
+                    orig_index_by_id: dict[int, int]) -> list[dict[str, Any]]:
+    """Re-point chapter headings at scenes after renumbering and trimming.
+
+    A chapter must NOT be dropped just because the one scene it happened to
+    start on was trimmed: the section's other scenes are still in the video, so
+    the heading is still true - it just starts slightly later. Dropping it
+    instead lost 3 of 8 chapters on a 20-minute test script.
+
+    Chapters are therefore re-anchored to the first surviving scene at or after
+    their original position, and collapsed if two land on the same scene.
+    """
+    surviving = sorted(
+        (orig_index_by_id[id(s)], i) for i, s in enumerate(scenes)
+        if id(s) in orig_index_by_id)
+    if not surviving:
+        return []
+
+    out: list[dict[str, Any]] = []
+    used: set[int] = set()
+    for chapter in chapters:
+        want = int(chapter.get("scene_index", -1))
+        anchor = next((new for orig, new in surviving if orig >= want), None)
+        if anchor is None or anchor in used:
+            continue
+        used.add(anchor)
+        out.append({**chapter, "scene_index": anchor})
+
+    if len(out) != len(chapters):
+        log_event("SCRIPT", "chapters merged after trimming",
+                  before=len(chapters), after=len(out))
+    return out
+
+
+def _spread(total: int, parts: int) -> list[int]:
+    """Split `total` into `parts` whole numbers that sum to exactly `total`.
+
+    Naive `total // parts` loses the remainder, which for a 3,000-word script
+    across 13 sections silently drops up to 12 words per section - about 8% of
+    the video. The remainder is distributed one unit at a time instead.
+    """
+    parts = max(1, parts)
+    base, extra = divmod(max(total, parts), parts)
+    return [base + (1 if i < extra else 0) for i in range(parts)]
+
+
+def _template_section(idea: ContentIdea, profile: NicheProfile, heading: str,
+                      role_hint: str, scenes: int, words: int,
+                      start_index: int) -> list[Scene]:
+    """Deterministic filler for ONE failed section of a long script.
+
+    Clearly degraded, never a mock: the lines are framing only and assert
+    nothing factual, because with no LLM response for this section there is
+    nothing verified to say. The section heading carries the actual meaning.
+    """
+    topic = idea.topic or "this topic"
+    pool = [
+        f"{heading} is where this gets specific.",
+        f"The usual account of {topic} skips over it.",
+        "The detail that matters is easy to walk past.",
+        f"Look at {topic} from here and the shape changes.",
+        "That gap is the part worth holding on to.",
+        "It changes which question is the right one to ask.",
+        f"It is also why {topic} keeps coming back around.",
+        "The short version leaves this out entirely.",
+    ]
+    out: list[Scene] = []
+    used = 0
+    i = 0
+    while len(out) < max(1, scenes):
+        text = pool[i % len(pool)]
+        i += 1
+        out.append(Scene(
+            index=start_index + len(out),
+            narration=text,
+            role=role_hint if len(out) == 0 else "value",
+            visual_prompt=f"{topic}, {heading}, {profile.visual_style}",
+            visual_keywords=_kw(f"{topic} {heading}"),
+        ))
+        used += count_words(text)
+        if used >= words and len(out) >= 1:
+            break
+    return out
+
+
+def _kw(text: str, limit: int = 3) -> list[str]:
+    from ..core.util import keywords as kw_extract
+    return kw_extract(text, limit=limit)
 
 
 def strip_banned_opener(text: str) -> str:
@@ -311,22 +725,47 @@ def strip_banned_opener(text: str) -> str:
 
 
 def _trim_to_budget(scenes: list[Scene], budget: int) -> list[Scene]:
-    """Shorten from the middle 'value' scenes first; never cut hook or payoff."""
+    """Shorten from the middle 'value' scenes first; never cut hook or payoff.
+
+    Deletions are spread across the timeline rather than taken strictly
+    longest-first. On a short script those are the same thing, but on a
+    sectioned long-form script the scenes are near-uniform in length, so
+    "longest first" degenerates into deleting one contiguous block - in testing
+    that removed the entire back third of a 20-minute video, taking three
+    chapters with it. Within each region the flabbiest scene still goes first.
+    """
     total = sum(count_words(s.narration) for s in scenes)
     if total <= budget:
         return scenes
     protected = {"hook", "payoff"}
-    # Drop whole low-value scenes from the middle outward.
-    order = sorted(
-        (i for i, s in enumerate(scenes)
-         if s.role not in protected and i not in (0, len(scenes) - 1)),
-        key=lambda i: -count_words(scenes[i].narration))
+    candidates = [i for i, s in enumerate(scenes)
+                  if s.role not in protected and i not in (0, len(scenes) - 1)]
     keep = [True] * len(scenes)
-    for i in order:
-        if total <= budget or sum(keep) <= 3:
+
+    # One region for a Short (preserving the original longest-first behaviour),
+    # up to 12 for a long script.
+    regions = max(1, min(12, len(scenes) // 8))
+    buckets: list[list[int]] = [[] for _ in range(regions)]
+    for i in candidates:
+        buckets[min(regions - 1, i * regions // max(len(scenes), 1))].append(i)
+    for bucket in buckets:
+        bucket.sort(key=lambda i: -count_words(scenes[i].narration))
+
+    # Round-robin: at most one deletion per region per lap.
+    while total > budget and sum(keep) > 3:
+        progressed = False
+        for bucket in buckets:
+            if total <= budget or sum(keep) <= 3:
+                break
+            while bucket:
+                i = bucket.pop(0)
+                if keep[i]:
+                    keep[i] = False
+                    total -= count_words(scenes[i].narration)
+                    progressed = True
+                    break
+        if not progressed:
             break
-        keep[i] = False
-        total -= count_words(scenes[i].narration)
     trimmed = [s for s, k in zip(scenes, keep) if k]
 
     # Still over budget: shorten the longest remaining scene by sentence.
