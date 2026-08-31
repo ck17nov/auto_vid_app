@@ -128,9 +128,13 @@ from a words-per-minute estimate.
 makes the karaoke captions frame-accurate. Piper is the licence-clean offline
 fallback; its captions are estimated from word length and punctuation.
 
-**Duration is enforced against measured audio.** If the synthesised narration
-misses the target, the speaking rate is recomputed and it is re-synthesised. A
-"45 second" video that runs 78 seconds is a failed video.
+**Duration is enforced against measured audio, and the estimate self-corrects.**
+The niche profiles guess a words-per-second rate, and the guess ran ~20% fast: a
+45-second request produced 53 seconds of narration, which was then fixed by
+speaking 28% faster. Speaking faster is the wrong lever. The pipeline now
+records what each voice actually delivers and budgets words against that, so the
+script is the right length before a word is spoken. Rate correction is still
+there, as the fine adjustment it should have been.
 
 **Two-pass render, exactly one lossy encode.** Per-scene motion clips first
 (parallel, near-lossless), then a single pass that cross-fades, burns captions,
@@ -192,7 +196,7 @@ Verified on this machine (Windows 11, Python 3.12, FFmpeg 9.0, JDK 17, Android S
 | Area | State |
 |---|---|
 | Engine: research -> script -> voice -> visuals -> render -> quality | Run end-to-end on Shorts and on a 4-minute long-form video, every artifact verified |
-| Python test suite | **352 tests passing** |
+| Python test suite | **360 tests passing** |
 | Static analysis | pyflakes clean (bar 3 documented import-probes) |
 | Backend API + CLI | 18 endpoints, `doctor` / `run` / `research` / `quota` exercised |
 | Android app | **Compiles and packages: 24.0 MB debug APK** (`com.autotube.ai.debug`, minSdk 26, targetSdk 35) |
@@ -203,14 +207,18 @@ Verified on this machine (Windows 11, Python 3.12, FFmpeg 9.0, JDK 17, Android S
 Two full dry runs, both with **no LLM key and no image key** — i.e. the
 worst-case free path (template scripts, procedural visuals):
 
-| | Science Short | Kids Short |
-|---|---|---|
-| Quality score | 97.5/100, 0 blockers | **100/100, 0 blockers, 0 warnings** |
-| Target vs actual duration | 40s -> 42.8s (7% off) | 30s -> 29.7s (**1% off**) |
-| Audio master | -14.02 LUFS / -1.73 dBTP | -14.01 LUFS / -4.65 dBTP |
-| Style template | SCIENCE_EXPLAINER, karaoke captions | KIDS_STORY, block captions |
-| Originality | passed, 0.00 similarity to research | passed |
-| Artifacts | all 16 required + thumbnails | all 16 required + thumbnails |
+| | Science | Kids | Deep ocean | Glaciers | Coral reefs |
+|---|---|---|---|---|---|
+| Quality | 97.5 | **100** | 97.5 | **100** | **100** |
+| 45s target, actual | 40->42.8s | 30->29.7s | 49.3s (+9.6%) | 45.3s (**+0.7%**) | 43.0s (-4.4%) |
+| Audio LUFS | -14.02 | -14.01 | -14.06 | -14.11 | -13.99 |
+| Rate correction needed | - | - | yes, +28% | yes, +26% | **none** |
+
+The last three are the same 45-second request run in sequence, and they show the
+speech-rate calibration converging: the first missed by 9.6% because the word
+budget was wrong, the second was rescued by re-synthesising at a faster rate,
+and the third budgeted 107 words instead of 130 and landed inside tolerance at a
+natural speaking rate with no correction at all.
 
 Both correctly stopped at `AWAITING_APPROVAL` rather than uploading, because
 approval mode is the default.
@@ -230,7 +238,7 @@ verified without a key; script *quality* still needs a real model.
 | Scenes | 63 (one image and one TTS call each) |
 | Chapters | 12, from the outline's real section headings |
 | Render | 5 pre-stitch segments, **0 duration-drift warnings** |
-| Output | 1920x1080 h264, limited-range BT.709, 147 MB (4.6 Mbps) |
+| Output | 1920x1080 h264, 147 MB (4.6 Mbps) |
 | Audio | -14.00 LUFS / -2.65 dBTP |
 | Captions | 161 karaoke groups across 610 words |
 | Quality | 93.3/100 |

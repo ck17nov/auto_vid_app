@@ -74,10 +74,25 @@ def check_video(path: Path) -> tuple[bool, str]:
     duration = float((probe.get("format") or {}).get("duration") or 0)
     if duration <= 1.0:
         return False, f"duration {duration:.2f}s is implausible"
-    return True, (f"{video.get('width')}x{video.get('height')} "
-                  f"{video.get('codec_name')}/{video.get('pix_fmt')} "
-                  f"{duration:.2f}s, audio {audio.get('codec_name')} "
-                  f"{audio.get('channels')}ch")
+
+    # Colour delivery. The source images are JPEG, so everything upstream is
+    # full range; shipping that untouched produced files tagged
+    # `color_range=pc, color_space=bt470bg` - full range labelled as PAL, which
+    # crushes blacks on any player that respects the tag.
+    detail = (f"{video.get('width')}x{video.get('height')} "
+              f"{video.get('codec_name')}/{video.get('pix_fmt')} "
+              f"{duration:.2f}s, audio {audio.get('codec_name')} "
+              f"{audio.get('channels')}ch")
+    colour_problems = []
+    if video.get("pix_fmt") not in ("yuv420p", "yuv420p10le"):
+        colour_problems.append(f"pix_fmt={video.get('pix_fmt')}")
+    if video.get("color_range") not in (None, "tv"):
+        colour_problems.append(f"color_range={video.get('color_range')}")
+    if video.get("color_space") not in (None, "bt709", "unknown"):
+        colour_problems.append(f"color_space={video.get('color_space')}")
+    if colour_problems:
+        return False, f"{detail} | not limited-range BT.709: " + ", ".join(colour_problems)
+    return True, detail
 
 
 def main() -> int:

@@ -274,6 +274,20 @@ class Pipeline:
                      idea: ContentIdea, context: str) -> Script:
         self._advance(job, JobStatus.SCRIPT, idea.topic[:60])
         hints = self.learner.hints()
+
+        # Budget words against what this voice has actually been measured
+        # delivering, not the niche profile's guess. The guess ran ~20% fast,
+        # which is how a "45 second" request became a 53-second recording that
+        # then had to be sped up by 28% to fit.
+        spec = self.voice_engine.voice_spec(request.language, "energetic")
+        measured = self.calibrated_words_per_second(
+            request.language, spec, profile.words_per_second)
+        if abs(measured - profile.words_per_second) > 0.05:
+            log_event("SCRIPT", "using measured speech rate for the word budget",
+                      profile=f"{profile.words_per_second:.2f} wps",
+                      measured=f"{measured:.2f} wps")
+            profile.words_per_second = measured
+
         script = self._retry("script", lambda: self.script_engine.generate(
             idea, profile, duration=request.duration_seconds,
             language=request.language, video_format=request.video_format,
@@ -299,6 +313,57 @@ class Pipeline:
         self.db.save_job(job)
         return script
 
+    # ------------------------------------------------------------------
+    SPEECH_RATE_KEY = "measured_words_per_second"
+
+    def _speech_rate_key(self, language: str, spec) -> str:
+        return f"{language or 'en'}|{getattr(spec, 'voice_id', '') or 'default'}"
+
+    def _record_speech_rate(self, language: str, spec, script: Script,
+                            total: float) -> None:
+        """Blend the measured words-per-second into a stored average.
+
+        Deliberately a slow-moving average with a small weight: one script full
+        of long words should nudge the estimate, not redefine it. Only recorded
+        at the base speaking rate, because a re-fitted clip was deliberately
+        sped up or slowed down and says nothing about natural pace.
+        """
+        from .core.util import count_words
+        if total <= 1.0:
+            return
+        words = count_words(script.script)
+        if words < 20:
+            return
+        measured = words / total
+        if not 0.8 <= measured <= 6.0:       # implausible: ignore rather than poison
+            return
+        key = self._speech_rate_key(language, spec)
+        try:
+            store = self.db.get_setting(self.SPEECH_RATE_KEY, {}) or {}
+            if not isinstance(store, dict):
+                store = {}
+            previous = store.get(key)
+            blended = measured if previous is None else previous * 0.7 + measured * 0.3
+            store[key] = round(blended, 3)
+            self.db.set_setting(self.SPEECH_RATE_KEY, store)
+        except Exception as exc:            # never fail a job over telemetry
+            log_event("TTS", "could not store measured speech rate",
+                      error=str(exc)[:120])
+            return
+        log_event("TTS", "measured speech rate recorded", voice=key,
+                  measured=f"{measured:.2f} wps",
+                  stored=f"{blended:.2f} wps")
+
+    def calibrated_words_per_second(self, language: str, spec,
+                                    fallback: float) -> float:
+        """The stored measurement for this voice, or the profile's guess."""
+        try:
+            store = self.db.get_setting(self.SPEECH_RATE_KEY, {}) or {}
+            value = float(store.get(self._speech_rate_key(language, spec), 0.0))
+        except Exception:
+            return fallback
+        return value if 0.8 <= value <= 6.0 else fallback
+
     def stage_voice(self, job: VideoJob, request: AutomationRequest, profile,
                     script: Script) -> tuple[Path, float, list]:
         self._advance(job, JobStatus.VOICE, f"lang={request.language}")
@@ -316,17 +381,33 @@ class Pipeline:
 
         clips, total, offsets = self._retry("voice", synthesize, job)
 
+        # Calibrate the words-per-second estimate from what the voice actually
+        # delivered, BEFORE any re-fit: a re-fitted clip was deliberately sped
+        # up or slowed down, so it says nothing about natural pace.
+        #
+        # `words_per_second` in the niche profile is a guess, and it was
+        # consistently optimistic: a "45s" Short came out at 53s because 127
+        # words were budgeted at 2.9 wps when edge-tts delivered 2.38. The
+        # correction was then made by speaking 28% faster, which is the wrong
+        # lever - the right one is to budget fewer words next time.
+        self._record_speech_rate(request.language, spec, script, total)
+
         # ---- duration re-fit -------------------------------------------
         target = float(request.duration_seconds)
         tolerance = float(self.cfg.get("quality.duration_tolerance_pct", 25)) / 100.0
         drift = (total - target) / target if target > 0 else 0.0
-        # Long-form gets a much tighter trigger. On a 45s Short, re-synthesising
-        # costs a meaningful share of the whole job, so it is only worth doing
-        # for a real miss. On a 4-minute video the extra TTS pass is about 4 of
-        # 65 minutes, and the looser trigger left a measured 6.7% error - 16
-        # seconds of drift on a video whose length was requested precisely.
-        trigger = (tolerance * 0.8 if request.video_format != "LONGFORM"
-                   else float(self.cfg.get("quality.longform_refit_pct", 7)) / 100.0)
+        # The trigger used to be 80% of the quality tolerance, i.e. ~20% drift,
+        # on the theory that re-synthesising costs a meaningful share of a short
+        # job. Measured, it does not: TTS for a 14-scene Short is ~50s of a
+        # ~7-minute job, and for long-form ~4 of 65 minutes. Meanwhile the loose
+        # trigger let real misses through - a "45s" Short delivered at 49.3s
+        # (+9.6%) and a "240s" long-form at 256s (+6.7%). Both were requested
+        # precisely, so both are wrong. One cheap extra pass is the better deal.
+        trigger = float(self.cfg.get("quality.refit_pct", 8)) / 100.0
+        if request.video_format == "LONGFORM":
+            trigger = float(self.cfg.get("quality.longform_refit_pct", 7)) / 100.0
+        # Never let the trigger exceed what the gate would fail anyway.
+        trigger = min(trigger, tolerance * 0.8)
         if abs(drift) > trigger:
             # Correct the speaking rate rather than shipping a mistimed video.
             # edge-tts rate is a percentage delta on the base speed.
@@ -341,6 +422,7 @@ class Pipeline:
             except Exception as exc:
                 log_event("TTS", "re-fit failed, keeping original narration",
                           error=str(exc)[:160])
+
 
         # Record measured per-scene timings back onto the script.
         durations: list[float] = []

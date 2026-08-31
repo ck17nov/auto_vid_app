@@ -612,3 +612,72 @@ class TestColourDelivery:
         assert stream.get("color_space") == "bt709", (
             f"color_space={stream.get('color_space')} - bt470bg is PAL, not HD")
         assert stream.get("color_primaries") == "bt709"
+
+
+# ==========================================================================
+# Speech-rate calibration
+# ==========================================================================
+class TestSpeechRateCalibration:
+    """Budget words against measured delivery, not a guessed rate.
+
+    The niche profiles guess `words_per_second`, and the guess ran ~20% fast:
+    a 45s Short budgeted 127 words at 2.9 wps, edge-tts delivered 2.38, the
+    recording came out at 53.3s, and the fix was to speak 28% faster. Speaking
+    faster is the wrong lever - budgeting fewer words is the right one.
+    """
+
+    @pytest.fixture
+    def pipe(self, tmp_path):
+        from engine.core.db import Database
+        from engine.pipeline import Pipeline
+        cfg = load_config()
+        cfg.set("dry_run", True)
+        return Pipeline(cfg, db=Database(tmp_path / "t.db"))
+
+    class _Spec:
+        voice_id = "en-US-AriaNeural"
+
+    def _script(self, words: int) -> Script:
+        text = " ".join(f"word{i}" for i in range(words))
+        return Script(script=text, scenes=[Scene(index=0, narration=text).to_dict()])
+
+    def test_measured_rate_is_stored_and_returned(self, pipe):
+        # 120 words over 50s = 2.4 wps.
+        pipe._record_speech_rate("en", self._Spec(), self._script(120), 50.0)
+        got = pipe.calibrated_words_per_second("en", self._Spec(), 2.9)
+        assert got == pytest.approx(2.4, abs=0.01)
+
+    def test_it_is_a_slow_moving_average(self, pipe):
+        """One odd script should nudge the estimate, not redefine it."""
+        pipe._record_speech_rate("en", self._Spec(), self._script(120), 50.0)
+        pipe._record_speech_rate("en", self._Spec(), self._script(200), 50.0)  # 4.0
+        got = pipe.calibrated_words_per_second("en", self._Spec(), 2.9)
+        assert 2.4 < got < 4.0, got
+        assert got == pytest.approx(2.4 * 0.7 + 4.0 * 0.3, abs=0.01)
+
+    def test_rates_are_kept_per_voice(self, pipe):
+        class Other:
+            voice_id = "hi-IN-SwaraNeural"
+        pipe._record_speech_rate("en", self._Spec(), self._script(120), 50.0)
+        assert pipe.calibrated_words_per_second("hi", Other(), 2.9) == 2.9, \
+            "a measurement for one voice must not leak to another"
+
+    def test_the_profile_guess_is_used_until_there_is_a_measurement(self, pipe):
+        assert pipe.calibrated_words_per_second("en", self._Spec(), 2.75) == 2.75
+
+    @pytest.mark.parametrize("words,total", [
+        (120, 0.5),      # implausibly short clip
+        (5, 50.0),       # too few words to be meaningful
+        (120, 5.0),      # 24 wps - impossible, would poison the average
+    ])
+    def test_implausible_measurements_are_ignored(self, pipe, words, total):
+        pipe._record_speech_rate("en", self._Spec(), self._script(words), total)
+        assert pipe.calibrated_words_per_second("en", self._Spec(), 2.9) == 2.9
+
+    def test_a_broken_store_never_fails_the_job(self, pipe):
+        """Calibration is telemetry; it must not be able to kill a render."""
+        def boom(*a, **kw):
+            raise RuntimeError("disk on fire")
+        pipe.db.get_setting = boom
+        pipe._record_speech_rate("en", self._Spec(), self._script(120), 50.0)
+        assert pipe.calibrated_words_per_second("en", self._Spec(), 2.9) == 2.9

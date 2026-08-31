@@ -155,10 +155,11 @@ quality:
   max_silence_seconds: 1.6
   min_audio_rms_db: -40.0
   duration_tolerance_pct: 25
-  # Long-form re-synthesises the narration at a corrected rate once drift
-  # exceeds this. Much tighter than the Short trigger because the extra TTS
-  # pass is a small share of a long render, and a measured 6.7% miss on a
-  # 4-minute video is 16 seconds of drift.
+  # Re-synthesise the narration at a corrected speaking rate once measured
+  # duration drifts this far from the target. Measured cost of that extra pass:
+  # ~50s on a 45s Short, ~4 min on a 4-minute video - cheap enough that being
+  # strict is worth it. A "45 second" video delivered at 49.3s is wrong.
+  refit_pct: 8
   longform_refit_pct: 7
 
 originality:

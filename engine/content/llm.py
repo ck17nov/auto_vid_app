@@ -284,11 +284,19 @@ class OllamaProvider:
 
     name = "ollama"
 
-    def __init__(self, host: str = "", model: str = "", timeout: int = 900):
+    # 900s was the original default and it made the pipeline indistinguishable
+    # from a hang: a CPU-only 7B model can sit there for a quarter of an hour
+    # with nothing on stdout. 300s still allows a slow-but-working local model
+    # while failing over to the template builder in a bearable time. Raise it
+    # with OLLAMA_TIMEOUT if you have a GPU and want the headroom.
+    DEFAULT_TIMEOUT = 300
+
+    def __init__(self, host: str = "", model: str = "", timeout: int = 0):
         self.host = (host or os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
                      ).rstrip("/")
         self.model = model or os.environ.get("OLLAMA_MODEL", "llama3.1:8b")
-        self.timeout = timeout
+        self.timeout = timeout or int(
+            os.environ.get("OLLAMA_TIMEOUT", self.DEFAULT_TIMEOUT))
         self._probe: tuple[float, bool] | None = None
 
     def available(self) -> bool:
@@ -319,6 +327,10 @@ class OllamaProvider:
             payload["system"] = system
         if json_mode:
             payload["format"] = "json"
+        # Say so before blocking. Local inference on CPU can take minutes, and
+        # a silent wait is the single most common "it hung" report.
+        log_event("LLM", "waiting on local ollama (can take minutes on CPU)",
+                  model=self.model, timeout=f"{self.timeout}s")
         with httpx.Client(timeout=self.timeout) as client:
             resp = client.post(f"{self.host}/api/generate", json=payload)
             if resp.status_code >= 400:
