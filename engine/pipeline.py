@@ -390,7 +390,15 @@ class Pipeline:
         # words were budgeted at 2.9 wps when edge-tts delivered 2.38. The
         # correction was then made by speaking 28% faster, which is the wrong
         # lever - the right one is to budget fewer words next time.
-        self._record_speech_rate(request.language, spec, script, total)
+        #
+        # Measure against SPEECH time, not the assembled timeline. `total`
+        # includes the 0.16s breath gap `concat` inserts between every scene,
+        # so with 19 scenes that is 2.9 seconds of silence counted as speaking.
+        # More scenes then meant a lower apparent rate, a smaller word budget,
+        # and more scenes again - a feedback loop that walked the stored rate
+        # from 2.43 down to 1.84 wps over a handful of runs.
+        speech_seconds = sum(c.duration for c in clips) or total
+        self._record_speech_rate(request.language, spec, script, speech_seconds)
 
         # ---- duration re-fit -------------------------------------------
         target = float(request.duration_seconds)

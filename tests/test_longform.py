@@ -1191,3 +1191,163 @@ class TestDurationBlocks:
                       "title_present"}
         blocking = {c.name for c in CHECKS if c.blocking}
         assert must_block <= blocking, must_block - blocking
+
+
+# ==========================================================================
+# What reaches the public description
+# ==========================================================================
+class TestDescriptionIntegrity:
+    """Two real leaks found by reading a finished description.
+
+    It contained the line "consequence: the future tidal silence as the Moon
+    drifts away" - an internal analysis field, hook-type label and all - and a
+    "Sources and further reading" block listing citations the model had
+    invented, correctly formatted and entirely unverifiable.
+    """
+
+    def _meta(self, cfg, *, angle: str, sources: list[dict]):
+        scenes = [Scene(index=i, narration=f"Sentence number {i} about the thing.",
+                        duration=3.0, role="value").to_dict() for i in range(6)]
+        script = Script(
+            scenes=scenes, script=" ".join(s["narration"] for s in scenes),
+            hook="The number everyone quotes was withdrawn.",
+            sources=sources, provider="groq")
+        idea = ContentIdea(topic="tides", angle=angle,
+                           hook_concept="x", working_title="Tides Explained")
+        return MetadataGenerator(cfg).build(
+            script, idea, build_profile("science"), video_format="SHORT")
+
+    def test_the_hook_type_prefix_never_reaches_the_description(self, cfg):
+        meta = self._meta(
+            cfg, angle="consequence: the future tidal silence as the Moon drifts away",
+            sources=[])
+        assert "consequence:" not in meta.description.lower()
+        assert "future tidal silence" in meta.description, \
+            "the prefix should be stripped, not the whole sentence dropped"
+
+    def test_internal_metrics_are_dropped_entirely(self, cfg):
+        meta = self._meta(cfg, angle="1 angles on tides are already saturated",
+                          sources=[])
+        assert "saturated" not in meta.description.lower()
+
+    def test_model_supplied_sources_are_not_published(self, cfg):
+        """Printing invented citations as evidence is worse than citing none."""
+        meta = self._meta(cfg, angle="", sources=[
+            {"title": 'Nature Astronomy, "Moon-Earth Distance Evolution" 2024',
+             "note": "Provides extrapolation to 50 Myr"},
+            {"title": "NASA JPL Lunar Recession Update, 2024",
+             "note": "Supports 3.8 cm/yr rate"},
+        ])
+        low = meta.description.lower()
+        assert "sources and further reading" not in low
+        assert "nature astronomy" not in low
+        assert "nasa jpl" not in low
+
+    def test_the_ai_disclosure_still_appears(self, cfg):
+        """Removing the sources block must not take the disclosure with it."""
+        meta = self._meta(cfg, angle="", sources=[{"title": "Something"}])
+        assert "ai" in meta.description.lower()
+
+    def test_sources_are_still_kept_on_the_script_for_review(self, cfg):
+        """Withheld from the description, not discarded - review needs them."""
+        scenes = [Scene(index=0, narration="A sentence about tides.").to_dict()]
+        script = Script(scenes=scenes, script="A sentence about tides.",
+                        sources=[{"title": "Invented Journal 2024"}])
+        assert script.sources[0]["title"] == "Invented Journal 2024"
+
+
+class TestWordsPerSceneFloor:
+    def test_fast_pacing_does_not_starve_scenes_of_words(self):
+        """FAST_FACTS sets scene_seconds=2.4, which asked for 19 scenes from a
+        130-word budget - 6.8 words each. The model wrote to that and produced
+        "Latest data shows 3.8 cm per.", a sentence cut off mid-phrase."""
+        from engine.content.script import MIN_WORDS_PER_SCENE, _budget
+        from engine.video.templates import apply_to_profile, select_template
+
+        profile = build_profile("space", duration_seconds=45,
+                                style="fast-paced, curiosity-driven")
+        apply_to_profile(profile, select_template("space",
+                                                  "fast-paced, curiosity-driven"))
+        target, _, scenes = _budget(profile, 45)
+        assert target // scenes >= MIN_WORDS_PER_SCENE, (
+            f"{target / scenes:.1f} words per scene truncates sentences")
+
+    def test_the_visual_pacing_stays_reasonable(self):
+        """The fix trades pacing for whole sentences; it must not overshoot."""
+        from engine.content.script import _budget
+        from engine.video.templates import apply_to_profile, select_template
+
+        for duration in (30, 45, 60, 180):
+            profile = build_profile("space", duration_seconds=duration,
+                                    style="fast-paced, curiosity-driven")
+            apply_to_profile(profile,
+                             select_template("space", "fast-paced, curiosity-driven"))
+            _, _, scenes = _budget(profile, duration)
+            per_visual = duration / scenes
+            assert per_visual <= 6.0, f"{duration}s -> {per_visual:.1f}s per visual"
+
+
+class TestSpeechRateMeasuresSpeechNotSilence:
+    """The rate must not depend on how many scenes there are.
+
+    `concat` inserts a 0.16s breath gap between every clip, so measuring
+    against the assembled timeline counted 2.9 seconds of silence as speaking
+    on a 19-scene Short. More scenes then meant a lower apparent rate, a
+    smaller word budget, and more scenes again - the stored value walked from
+    2.43 down to 1.84 wps over a handful of runs.
+    """
+
+    GAP = 0.16
+
+    class Clip:
+        def __init__(self, duration):
+            self.duration = duration
+
+    def _pipe(self, tmp_path):
+        from engine.core.db import Database
+        from engine.pipeline import Pipeline
+        cfg = load_config()
+        cfg.set("dry_run", True)
+        return Pipeline(cfg, db=Database(tmp_path / "t.db"))
+
+    class _Spec:
+        voice_id = "test-voice"
+
+    def _script(self, words):
+        text = " ".join(f"w{i}" for i in range(words))
+        return Script(script=text, scenes=[Scene(index=0, narration=text).to_dict()])
+
+    def test_the_rate_is_independent_of_scene_count(self, tmp_path):
+        """Same words, same speech time, different scene counts -> same rate."""
+        pipe = self._pipe(tmp_path)
+        words = 120
+
+        for scenes in (4, 19):
+            pipe.db.set_setting("measured_words_per_second", {})
+            per_clip = 50.0 / scenes                     # 50s of actual speech
+            clips = [self.Clip(per_clip) for _ in range(scenes)]
+            speech = sum(c.duration for c in clips)
+            pipe._record_speech_rate("en", self._Spec(), self._script(words),
+                                     speech)
+            rate = pipe.calibrated_words_per_second("en", self._Spec(), 9.9)
+            assert rate == pytest.approx(words / 50.0, abs=0.01), \
+                f"{scenes} scenes gave {rate:.2f} wps"
+
+    def test_including_the_gaps_would_have_biased_it_low(self, tmp_path):
+        """Documents the bug the fix removes."""
+        pipe = self._pipe(tmp_path)
+        words, scenes = 120, 19
+        per_clip = 50.0 / scenes
+        speech = per_clip * scenes
+        timeline = speech + (scenes - 1) * self.GAP
+
+        pipe._record_speech_rate("en", self._Spec(), self._script(words), speech)
+        good = pipe.calibrated_words_per_second("en", self._Spec(), 9.9)
+
+        pipe.db.set_setting("measured_words_per_second", {})
+        pipe._record_speech_rate("en", self._Spec(), self._script(words), timeline)
+        biased = pipe.calibrated_words_per_second("en", self._Spec(), 9.9)
+
+        assert good > biased, "the gap-inclusive measurement must read slower"
+        assert good / biased > 1.05, (
+            f"{good:.2f} vs {biased:.2f} - the bias should be several percent")

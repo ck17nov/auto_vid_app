@@ -54,6 +54,31 @@ Rules:
 - Output valid JSON only."""
 
 
+# Hook-type / analysis prefixes the idea engine attaches internally. They are
+# useful for scoring and must never reach a viewer.
+_ANALYSIS_PREFIX = re.compile(
+    r"^\s*(consequence|correction|hidden|reveal|contradiction|mechanism|"
+    r"question|story|number|comparison|myth|gap|angle)\s*[:\-]\s*", re.I)
+
+_NOT_PUBLISHABLE = re.compile(
+    r"(gap score|momentum|cluster|saturated|\bn=|derived from|"
+    r"without an LLM|structural|\b\d+\s+(angles?|videos?|samples?)\b)", re.I)
+
+
+def _publishable_angle(text: str) -> str:
+    """Return `text` fit for a public description, or "".
+
+    Strips the internal hook-type prefix and rejects anything that reads like a
+    metric or an internal note rather than a sentence.
+    """
+    cleaned = _ANALYSIS_PREFIX.sub("", (text or "").strip()).strip()
+    if not cleaned or len(cleaned.split()) < 4:
+        return ""
+    if _NOT_PUBLISHABLE.search(cleaned):
+        return ""
+    return cleaned[0].upper() + cleaned[1:]
+
+
 class MetadataGenerator:
     def __init__(self, cfg: Config, router=None):
         self.cfg = cfg
@@ -322,20 +347,33 @@ Return JSON: {{"titles": ["...", "..."]}}"""
         lead = sentences(script.script)
         summary = " ".join(lead[:2]) if lead else idea.angle
         parts.append(truncate(summary, 260))
-        if idea.angle:
-            parts.append(truncate(idea.angle, 200))
+        # `idea.angle` is an ANALYSIS field, not copy. A real description shipped
+        # with the line "consequence: the future tidal silence as the Moon
+        # drifts away" - the hook-type label and all. Same class of leak as the
+        # one that reached the narration, so it gets the same treatment.
+        angle = _publishable_angle(idea.angle)
+        if angle:
+            parts.append(truncate(angle, 200))
 
         if meta.chapters and video_format == "LONGFORM":
             parts.append("Chapters:\n" + "\n".join(
                 f"{int(c['seconds']) // 60:02d}:{int(c['seconds']) % 60:02d} {c['label']}"
                 for c in meta.chapters))
 
+        # Model-generated citations are NOT published.
+        #
+        # A real run produced these under "Sources and further reading":
+        #   - NASA JPL Lunar Recession Update, 2024
+        #   - Nature Astronomy, "Moon-Earth Distance Evolution" 2024
+        # Plausible-looking, correctly formatted, and unverifiable - the system
+        # prompt forbids inventing studies and the model did it anyway. Printing
+        # them in a public description presents fabrications as evidence, which
+        # is worse than citing nothing. They stay in script.json for review, and
+        # the fact-check report already grades the claims that rest on them.
         if script.sources:
-            lines = [f"- {s.get('title', '').strip()}"
-                     + (f" - {s.get('note', '').strip()}" if s.get("note") else "")
-                     for s in script.sources if s.get("title")]
-            if lines:
-                parts.append("Sources and further reading:\n" + "\n".join(lines[:6]))
+            log_event("METADATA", "model-supplied sources withheld from the "
+                                  "description (unverifiable)",
+                      count=len(script.sources))
 
         # Required / recommended disclosures (spec sections 11 & 48).
         if meta.synthetic_disclosure:

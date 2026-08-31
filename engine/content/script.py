@@ -66,6 +66,12 @@ it in the claims array with a lower confidence.
 # and it is high enough that pacing is decided by the niche profile instead.
 DEFAULT_MAX_SCENES = 400
 
+# Minimum words a scene needs to carry a complete spoken sentence. Below about
+# eight, narration starts arriving as fragments - measured output included
+# "Latest data shows 3.8 cm per." with the word "year" simply missing, because
+# the per-scene budget ran out mid-phrase.
+MIN_WORDS_PER_SCENE = 9
+
 
 def _budget(profile: NicheProfile, duration: int, *,
             max_scenes: int = DEFAULT_MAX_SCENES) -> tuple[int, int, int]:
@@ -75,6 +81,25 @@ def _budget(profile: NicheProfile, duration: int, *,
     ideal = int(round(duration / max(profile.scene_seconds, 1.5)))
     ceiling = max_scenes if max_scenes > 0 else DEFAULT_MAX_SCENES
     scenes = max(3, min(ideal, ceiling))
+
+    # A scene must have room for a whole sentence.
+    #
+    # Scene count comes from the pacing target and word count from the speaking
+    # rate, and the two can collide: FAST_FACTS sets scene_seconds to 2.4, so a
+    # 45-second video asked for 19 scenes from a 130-word budget - 6.8 words
+    # each. The model then wrote to that, and produced narration like "Latest
+    # data shows 3.8 cm per." - a sentence cut off mid-phrase because there was
+    # no room to finish it. Fewer, longer scenes read far better than more,
+    # truncated ones, so the word budget wins and the visuals hold slightly
+    # longer.
+    if scenes > 3 and target // scenes < MIN_WORDS_PER_SCENE:
+        capped = max(3, target // MIN_WORDS_PER_SCENE)
+        if capped < scenes:
+            log_event("SCRIPT", "scene count reduced to keep sentences whole",
+                      wanted=scenes, using=capped,
+                      words_per_scene=f"{target / max(capped, 1):.1f}",
+                      floor=MIN_WORDS_PER_SCENE)
+            scenes = capped
     if ideal > ceiling:
         log_event("SCRIPT", "scene count capped; visuals will hold longer "
                             "than the niche pacing target",
