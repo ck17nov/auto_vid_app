@@ -252,7 +252,13 @@ data class YouTubeStatusDto(
 )
 
 @Serializable
-data class TokenBodyDto(@SerialName("refresh_token") val refreshToken: String)
+data class TokenBodyDto(
+    @SerialName("refresh_token") val refreshToken: String,
+    // The Android OAuth client that minted this token. The backend can
+    // only refresh it with this same client id and no secret, because an
+    // Android client is a public PKCE client.
+    @SerialName("client_id") val clientId: String = "",
+)
 
 @Serializable
 data class RejectBodyDto(val reason: String = "")

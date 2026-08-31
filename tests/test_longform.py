@@ -15,6 +15,7 @@ length once the render is batched.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -813,3 +814,190 @@ class TestTransientRetry:
         router.providers = [broken, Good()]
         assert router.complete("hi").provider == "good"
         assert broken.calls == 1, "a bad key must not be retried three times"
+
+
+# ==========================================================================
+# Phone-issued OAuth tokens
+# ==========================================================================
+class TestPhoneAuth:
+    """A token from the Android app is bound to a PUBLIC PKCE client.
+
+    It can only be refreshed by that same client id, with no secret.
+    Refreshing it with the desktop YOUTUBE_CLIENT_ID/SECRET from .env fails
+    with `unauthorized_client`, so connecting from the phone looked like it
+    succeeded and then never uploaded anything.
+    """
+
+    @pytest.fixture
+    def auth(self, tmp_path, monkeypatch):
+        from engine.youtube.auth import YouTubeAuth
+        monkeypatch.delenv("YOUTUBE_CLIENT_ID", raising=False)
+        monkeypatch.delenv("YOUTUBE_CLIENT_SECRET", raising=False)
+        cfg = load_config()
+        cfg.set("app.workspace", str(tmp_path))
+        return YouTubeAuth(cfg)
+
+    def test_phone_token_is_authorized_without_env_credentials(self, auth):
+        """The whole point: no desktop client needed for the phone flow."""
+        assert auth.configured is False
+        auth.import_refresh_token("1//refresh-abc", "android-123.apps.googleusercontent.com")
+        assert auth.authorized is True
+
+    def test_a_bare_token_is_not_authorized_without_env_credentials(self, auth):
+        """Nothing could refresh it, so claiming success would be a lie."""
+        auth.import_refresh_token("1//refresh-abc")
+        assert auth.authorized is False
+
+    def test_the_issuing_client_is_recorded_as_public(self, auth):
+        auth.import_refresh_token("1//refresh-abc", "android-123.apps.googleusercontent.com")
+        data = auth.store.read()
+        assert data["client_id"] == "android-123.apps.googleusercontent.com"
+        assert data["public_client"] is True
+
+    def test_credentials_refresh_with_the_device_client_and_no_secret(self, auth):
+        auth.import_refresh_token("1//refresh-abc", "android-123.apps.googleusercontent.com")
+        captured = {}
+
+        import google.oauth2.credentials as gc
+
+        class FakeCreds:
+            def __init__(self, **kw):
+                captured.update(kw)
+                self.valid = True
+                self.token = "at"
+                self.refresh_token = kw["refresh_token"]
+                self.token_uri = kw["token_uri"]
+                self.scopes = kw["scopes"]
+                self.expiry = None
+
+        original = gc.Credentials
+        gc.Credentials = FakeCreds
+        try:
+            auth.credentials()
+        finally:
+            gc.Credentials = original
+
+        assert captured["client_id"] == "android-123.apps.googleusercontent.com"
+        assert captured["client_secret"] is None,             "an Android client has no secret; sending one is rejected"
+
+    def test_a_refresh_does_not_erase_the_recorded_client(self, auth):
+        """This made phone auth work exactly once.
+
+        _persist replaced the whole record, so the first successful refresh
+        discarded client_id and every later refresh fell back to .env.
+        """
+        auth.import_refresh_token("1//refresh-abc", "android-123.apps.googleusercontent.com")
+
+        class Creds:
+            token = "new-access"
+            refresh_token = "1//refresh-abc"
+            token_uri = "https://oauth2.googleapis.com/token"
+            scopes = ["s"]
+            expiry = None
+
+        auth._persist(Creds())
+        data = auth.store.read()
+        assert data.get("client_id") == "android-123.apps.googleusercontent.com"
+        assert data.get("public_client") is True
+        assert auth.authorized is True
+
+    def test_desktop_flow_still_uses_the_env_credentials(self, tmp_path, monkeypatch):
+        from engine.youtube.auth import YouTubeAuth
+        monkeypatch.setenv("YOUTUBE_CLIENT_ID", "desktop-id")
+        monkeypatch.setenv("YOUTUBE_CLIENT_SECRET", "desktop-secret")
+        cfg = load_config()
+        cfg.set("app.workspace", str(tmp_path))
+        auth = YouTubeAuth(cfg)
+        auth.import_refresh_token("1//desktop-refresh")     # no client id
+        assert auth.authorized is True
+
+        captured = {}
+        import google.oauth2.credentials as gc
+
+        class FakeCreds:
+            def __init__(self, **kw):
+                captured.update(kw)
+                self.valid = True
+                self.token = "at"
+                self.refresh_token = kw["refresh_token"]
+                self.token_uri = kw["token_uri"]
+                self.scopes = kw["scopes"]
+                self.expiry = None
+
+        original = gc.Credentials
+        gc.Credentials = FakeCreds
+        try:
+            auth.credentials()
+        finally:
+            gc.Credentials = original
+        assert captured["client_id"] == "desktop-id"
+        assert captured["client_secret"] == "desktop-secret"
+
+    def test_empty_token_is_rejected(self, auth):
+        from engine.youtube.auth import AuthError
+        with pytest.raises(AuthError):
+            auth.import_refresh_token("   ")
+
+
+# ==========================================================================
+# Token store permissions
+# ==========================================================================
+class TestTokenStorePermissions:
+    r"""Hardening must not lock out the process that did the hardening.
+
+    On a machine whose account name contains a hyphen and matches the host
+    name ("Sushma-Chandan" on "SUSHMA-CHANDAN"), icacls resolved
+    `Sushma-Chandan:F` to the principal `SUSHMA-CHANDAN\` with an EMPTY
+    account name. The grant landed nowhere, inheritance had already been
+    stripped, and the YouTube token file became unreadable by everyone -
+    including the backend that had just written it. Uploads failed with a bare
+    PermissionError that pointed at nothing.
+    """
+
+    def test_a_written_token_is_still_readable(self, tmp_path):
+        from engine.youtube.auth import TokenStore
+        store = TokenStore(tmp_path / "secrets" / "token.json")
+        store.write({"refresh_token": "1//abc", "scopes": ["s"]})
+        assert store.exists() is True
+        assert store.read()["refresh_token"] == "1//abc",             "the store locked out its own owner"
+
+    def test_repeated_writes_stay_readable(self, tmp_path):
+        """Every refresh rewrites this file, so once is not enough."""
+        from engine.youtube.auth import TokenStore
+        store = TokenStore(tmp_path / "secrets" / "token.json")
+        for n in range(4):
+            store.write({"refresh_token": f"1//abc{n}"})
+            assert store.read()["refresh_token"] == f"1//abc{n}", f"write {n}"
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows ACL behaviour")
+    def test_the_sid_is_resolvable_on_this_machine(self):
+        """Granting by SID is the whole point; if it is empty we silently skip."""
+        from engine.youtube.auth import TokenStore
+        sid = TokenStore._current_sid()
+        assert sid.upper().startswith("S-1-"), f"got {sid!r}"
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows ACL behaviour")
+    def test_granting_by_name_would_have_failed(self, tmp_path):
+        """Pins the actual root cause, not just the symptom.
+
+        If this ever starts passing, icacls name resolution changed and the
+        comment in _current_sid should be revisited - but granting by SID
+        remains correct regardless.
+        """
+        import subprocess
+        target = tmp_path / "probe.json"
+        target.write_text("{}", encoding="utf-8")
+        user = os.environ.get("USERNAME", "")
+        if not user or "-" not in user:
+            pytest.skip("this failure needs a hyphenated account name")
+        subprocess.run(["icacls", str(target), "/inheritance:r",
+                        "/grant:r", f"{user}:F"],
+                       capture_output=True, timeout=30, check=False)
+        try:
+            target.read_text(encoding="utf-8")
+            readable = True
+        except OSError:
+            readable = False
+        subprocess.run(["icacls", str(target), "/reset"],
+                       capture_output=True, timeout=30, check=False)
+        assert readable is False,             "name-based grant now works; the SID approach is still safer"

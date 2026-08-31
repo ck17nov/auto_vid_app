@@ -65,16 +65,74 @@ class TokenStore:
         except OSError:
             pass
         if os.name == "nt":
-            try:
-                import subprocess
-                user = os.environ.get("USERNAME", "")
-                if user:
-                    subprocess.run(
-                        ["icacls", str(self.path), "/inheritance:r",
-                         "/grant:r", f"{user}:F"],
-                        capture_output=True, timeout=30, check=False)
-            except Exception:
-                pass
+            self._lock_down_windows()
+
+    @staticmethod
+    def _current_sid() -> str:
+        """The current user's SID, or "" if it cannot be determined.
+
+        Granting by NAME is not safe. On a machine where the account name
+        contains a hyphen and matches the host name - "Sushma-Chandan" on
+        "SUSHMA-CHANDAN" - icacls resolved `Sushma-Chandan:F` to the principal
+        `SUSHMA-CHANDAN\\` with an EMPTY account, so the grant landed nowhere,
+        inheritance had already been stripped, and the token file became
+        unreadable by everyone including the process that wrote it. Uploads
+        then failed with a bare PermissionError.
+
+        A SID has no parsing ambiguity, so that is what we grant to.
+        """
+        import subprocess
+        try:
+            proc = subprocess.run(["whoami", "/user", "/fo", "csv", "/nh"],
+                                  capture_output=True, text=True, timeout=30)
+        except Exception:
+            return ""
+        for field in reversed((proc.stdout or "").strip().split(",")):
+            candidate = field.strip().strip('"')
+            if candidate.upper().startswith("S-1-"):
+                return candidate
+        return ""
+
+    def _lock_down_windows(self) -> None:
+        """Harden the ACL, then CHECK it did not lock us out.
+
+        Security hardening that breaks the feature it protects is worse than no
+        hardening, so this verifies readability afterwards and reverts if the
+        file became inaccessible.
+        """
+        import subprocess
+
+        sid = self._current_sid()
+        if not sid:
+            log_event("YOUTUBE", "token file ACL left at inherited permissions",
+                      reason="could not resolve the current user SID")
+            return
+        try:
+            subprocess.run(
+                ["icacls", str(self.path), "/inheritance:r",
+                 "/grant:r", f"*{sid}:F"],
+                capture_output=True, timeout=30, check=False)
+        except Exception as exc:
+            log_event("YOUTUBE", "could not harden token file ACL",
+                      error=str(exc)[:120])
+            return
+
+        try:
+            self.path.read_text(encoding="utf-8")
+            return                          # hardened and still readable
+        except OSError as exc:
+            log_event("YOUTUBE", "ACL hardening locked out the owner, reverting",
+                      error=str(exc)[:120])
+        try:
+            subprocess.run(["icacls", str(self.path), "/reset"],
+                           capture_output=True, timeout=30, check=False)
+            subprocess.run(["icacls", str(self.path), "/grant",
+                            f"*{sid}:F"],
+                           capture_output=True, timeout=30, check=False)
+        except Exception as exc:
+            log_event("YOUTUBE", "could not restore token file access",
+                      error=str(exc)[:120],
+                      hint=f"fix manually: icacls \"{self.path}\" /reset")
 
     def clear(self) -> None:
         self.path.unlink(missing_ok=True)
@@ -89,11 +147,31 @@ class YouTubeAuth:
 
     @property
     def configured(self) -> bool:
+        """True if a DESKTOP flow can be started here (needs id + secret)."""
         return bool(self.client_id and self.client_secret)
 
     @property
     def authorized(self) -> bool:
-        return self.store.exists() and bool(self.store.read().get("refresh_token"))
+        """True if we hold a refresh token AND a client that can refresh it.
+
+        Two shapes are valid, and the distinction matters:
+
+        * Desktop flow (`autotube auth login`) - a confidential client, so the
+          stored token is refreshed with YOUTUBE_CLIENT_ID + SECRET from .env.
+        * Phone flow (AppAuth on Android) - a PUBLIC client using PKCE, which
+          has no secret at all. Its refresh token is bound to the Android
+          client ID, so it can only be refreshed with THAT id and no secret.
+
+        Refreshing an Android-issued token with the desktop client's
+        credentials fails with `unauthorized_client`, which is why the issuing
+        client id is stored alongside the token rather than assumed.
+        """
+        if not self.store.exists():
+            return False
+        data = self.store.read()
+        if not data.get("refresh_token"):
+            return False
+        return bool(data.get("client_id") or self.configured)
 
     # ------------------------------------------------------------------
     def _client_config(self) -> dict[str, Any]:
@@ -112,20 +190,36 @@ class YouTubeAuth:
         from google.auth.transport.requests import Request
         from google.oauth2.credentials import Credentials
 
-        if not self.configured:
-            raise AuthError(
-                "YOUTUBE_CLIENT_ID / YOUTUBE_CLIENT_SECRET are not set. "
-                "See docs/YOUTUBE_SETUP.md")
         data = self.store.read()
         if not data.get("refresh_token"):
-            raise AuthError("not authorized yet - run: autotube auth login")
+            raise AuthError(
+                "not authorized yet - run `autotube auth login`, or connect "
+                "YouTube from the Android app")
+
+        # Refresh with the client that ISSUED the token. A phone-issued token
+        # comes from a public Android client (PKCE, no secret); a desktop token
+        # comes from the confidential client in .env. Mixing them fails with
+        # `unauthorized_client`, and the error does not say which half is wrong.
+        stored_client = str(data.get("client_id") or "").strip()
+        if stored_client:
+            client_id = stored_client
+            client_secret = None if data.get("public_client") else self.client_secret
+        else:
+            if not self.configured:
+                raise AuthError(
+                    "YOUTUBE_CLIENT_ID / YOUTUBE_CLIENT_SECRET are not set, and "
+                    "the stored token did not record its own client id. Either "
+                    "set both in .env, or reconnect from the Android app so it "
+                    "can send its client id. See docs/YOUTUBE_SETUP.md")
+            client_id = self.client_id
+            client_secret = self.client_secret
 
         creds = Credentials(
             token=data.get("token"),
             refresh_token=data["refresh_token"],
             token_uri=data.get("token_uri", "https://oauth2.googleapis.com/token"),
-            client_id=self.client_id,
-            client_secret=self.client_secret,
+            client_id=client_id,
+            client_secret=client_secret,
             scopes=data.get("scopes", SCOPES),
         )
         if not creds.valid:
@@ -135,13 +229,27 @@ class YouTubeAuth:
         return creds
 
     def _persist(self, creds) -> None:
-        self.store.write({
+        """Write refreshed credentials back, KEEPING the issuing client.
+
+        This used to replace the whole record, which silently discarded the
+        `client_id` / `public_client` fields written by a phone authorisation.
+        The effect was that connecting from the Android app worked exactly
+        once: the first refresh succeeded, wiped the client id, and every
+        refresh after that fell back to the desktop credentials in .env and
+        failed with `unauthorized_client`.
+        """
+        previous = self.store.read() if self.store.exists() else {}
+        record = {
             "token": creds.token,
             "refresh_token": creds.refresh_token,
             "token_uri": creds.token_uri,
             "scopes": list(creds.scopes or SCOPES),
             "expiry": creds.expiry.isoformat() if creds.expiry else None,
-        })
+        }
+        for carried in ("client_id", "public_client"):
+            if previous.get(carried):
+                record[carried] = previous[carried]
+        self.store.write(record)
 
     # ------------------------------------------------------------------
     def login_local_server(self, port: int = 8765) -> dict[str, Any]:
@@ -161,17 +269,32 @@ class YouTubeAuth:
         log_event("YOUTUBE", "authorised", scopes=len(SCOPES))
         return self.store.read()
 
-    def import_refresh_token(self, refresh_token: str) -> None:
-        """Accept a refresh token obtained by the Android app (AppAuth)."""
+    def import_refresh_token(self, refresh_token: str,
+                             client_id: str = "") -> None:
+        """Accept a refresh token obtained by the Android app (AppAuth).
+
+        `client_id` is the Android OAuth client that minted the token. Record
+        it: the token can ONLY be refreshed by that same client, with no
+        secret, because an Android client is a public PKCE client. Without it
+        the backend fell back to YOUTUBE_CLIENT_ID/SECRET from .env and Google
+        rejected the refresh with `unauthorized_client` - so authorising on the
+        phone appeared to succeed and then never worked.
+        """
         if not refresh_token.strip():
             raise AuthError("empty refresh token")
-        self.store.write({
+        record: dict[str, Any] = {
             "token": None,
             "refresh_token": refresh_token.strip(),
             "token_uri": "https://oauth2.googleapis.com/token",
             "scopes": SCOPES,
-        })
-        log_event("YOUTUBE", "refresh token imported from device")
+        }
+        if client_id.strip():
+            record["client_id"] = client_id.strip()
+            record["public_client"] = True
+        self.store.write(record)
+        log_event("YOUTUBE", "refresh token imported from device",
+                  client=("device client recorded" if client_id.strip()
+                          else "no client id sent - will use .env credentials"))
 
     def logout(self) -> None:
         self.store.clear()

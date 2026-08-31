@@ -150,6 +150,10 @@ class AutomationBody(BaseModel):
 
 class TokenBody(BaseModel):
     refresh_token: str = Field(min_length=10, max_length=4096)
+    # The Android OAuth client that minted the token. Optional for backwards
+    # compatibility, but without it the backend has to guess, and refreshing an
+    # Android-issued token with the desktop client's credentials fails.
+    client_id: str = Field(default="", max_length=256)
 
 
 class RejectBody(BaseModel):
@@ -517,12 +521,15 @@ def import_token(body: TokenBody) -> dict[str, Any]:
     """Receive the refresh token the Android app obtained via AppAuth.
 
     The token is written to the 0600 token store; it is never logged and never
-    returned by any endpoint.
+    returned by any endpoint. The client id is stored with it because an
+    Android client is a public PKCE client and only that same client can
+    refresh the token.
     """
     from engine.youtube.auth import YouTubeAuth
     auth = YouTubeAuth(CFG)
-    auth.import_refresh_token(body.refresh_token)
-    return {"stored": True, "authorized": auth.authorized}
+    auth.import_refresh_token(body.refresh_token, body.client_id)
+    return {"stored": True, "authorized": auth.authorized,
+            "refreshable": bool(body.client_id or auth.configured)}
 
 
 def _job_summary(job) -> dict[str, Any]:

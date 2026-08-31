@@ -199,10 +199,19 @@ class AutoTubeRepository(
     /**
      * Hand the OAuth refresh token to the backend so it can upload.
      * The token is stored encrypted on device and never logged.
+     *
+     * The client id goes with it. A token minted by an Android OAuth client
+     * can only be refreshed by that same client, with no secret, because an
+     * Android client is a public PKCE client. Sending the token alone left the
+     * backend refreshing it with the desktop credentials from .env, which
+     * Google rejects - so connecting from the phone looked like it worked and
+     * then never uploaded anything.
      */
     suspend fun sendRefreshToken(token: String): Result<Boolean> = call {
         store.refreshToken = token
-        api.service().sendRefreshToken(TokenBodyDto(token)).stored
+        api.service().sendRefreshToken(
+            TokenBodyDto(token, store.oauthClientId.trim())
+        ).stored
     }
 
     fun mediaUrl(path: String): String = api.mediaUrl(path)
