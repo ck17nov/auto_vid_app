@@ -1,0 +1,50 @@
+[Unit]
+Description=AutoTube AI backend
+Documentation=https://github.com/ck17nov/auto_vid_app
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@APP_USER@
+Group=@APP_USER@
+WorkingDirectory=@APP_DIR@
+
+# Bind to loopback ONLY. Caddy (or Tailscale) is what faces the network, so
+# uvicorn is never directly exposed. Binding 0.0.0.0 here would put the API on
+# the public internet in plain HTTP, sending your API token in the clear.
+ExecStart=@APP_DIR@/.venv/bin/python -m backend.cli serve --host 127.0.0.1 --port @PORT@
+
+Restart=always
+RestartSec=5
+# A render can take an hour; never let systemd interrupt one on a reload.
+TimeoutStopSec=120
+KillSignal=SIGINT
+
+# ffmpeg is the whole workload, so let it use the machine - but stay below the
+# core count so the API keeps responding to the phone while a render runs.
+Nice=5
+CPUWeight=100
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=autotube
+
+# ---- hardening -----------------------------------------------------------
+# The service handles YouTube credentials, so it gets no more of the system
+# than it needs. ProtectHome is off because the workspace and token store live
+# under the service account's own home when APP_DIR is elsewhere.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+# The app writes to its own workspace and reads .env; nothing else.
+ReadWritePaths=@APP_DIR@
+
+[Install]
+WantedBy=multi-user.target

@@ -502,6 +502,89 @@ def quota() -> None:
 
 
 @app.command()
+def prune(keep_days: int = typer.Option(14, "--keep-days",
+                                        help="delete job folders older than this"),
+          keep_last: int = typer.Option(10, "--keep-last",
+                                        help="always keep this many newest jobs"),
+          videos_only: bool = typer.Option(
+              False, "--videos-only",
+              help="delete only the large media, keep the JSON reports"),
+          yes: bool = typer.Option(False, "--yes", help="do not ask")) -> None:
+    """Delete old job output to reclaim disk.
+
+    A finished job folder is 30-150 MB, almost all of it video and WAV. On a
+    laptop that is a rounding error; on an Oracle Always Free instance it fills
+    the boot volume in a few weeks and the next render dies mid-encode with a
+    confusing ffmpeg error.
+
+    Published videos live on YouTube, so the local copy is only useful for
+    review. `--videos-only` keeps every report and originality/quality record
+    while dropping the media, which is usually the right trade.
+    """
+    import shutil
+    import time as _time
+
+    cfg = load_config()
+    jobs_dir = cfg.workspace / "jobs"
+    if not jobs_dir.exists():
+        console.print("no jobs directory yet")
+        return
+
+    folders = sorted((p for p in jobs_dir.iterdir() if p.is_dir()),
+                     key=lambda p: p.stat().st_mtime, reverse=True)
+    protected = set(folders[:max(0, keep_last)])
+    cutoff = _time.time() - keep_days * 86400
+
+    def folder_size(path: Path) -> int:
+        return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
+    MEDIA = {".mp4", ".wav", ".mp3", ".jpg", ".jpeg", ".png", ".webp"}
+    targets: list[tuple[Path, int]] = []
+    for folder in folders:
+        if folder in protected or folder.stat().st_mtime >= cutoff:
+            continue
+        if videos_only:
+            size = sum(f.stat().st_size for f in folder.rglob("*")
+                       if f.is_file() and f.suffix.lower() in MEDIA)
+            if size == 0:
+                continue          # already pruned
+        else:
+            size = folder_size(folder)
+        targets.append((folder, size))
+
+    if not targets:
+        console.print(f"nothing to prune (keeping the newest {keep_last} and "
+                      f"anything under {keep_days} days old)")
+        return
+
+    total = sum(size for _, size in targets)
+    what = "media files in" if videos_only else "entire folders"
+    console.print(Panel(
+        "\n".join(f"{p.name:44} {s / 1e6:8.1f} MB" for p, s in targets[:15])
+        + (f"\n... and {len(targets) - 15} more" if len(targets) > 15 else "")
+        + f"\n\nwould free {total / 1e6:.0f} MB from {len(targets)} {what}",
+        title="prune candidates", expand=False))
+
+    if not yes and not typer.confirm("delete these?"):
+        console.print("cancelled")
+        return
+
+    freed = 0
+    for folder, size in targets:
+        try:
+            if videos_only:
+                for f in folder.rglob("*"):
+                    if f.is_file() and f.suffix.lower() in MEDIA:
+                        f.unlink(missing_ok=True)
+            else:
+                shutil.rmtree(folder)
+            freed += size
+        except OSError as exc:
+            console.print(f"[yellow]skipped {folder.name}: {exc}[/yellow]")
+    console.print(f"[green]freed {freed / 1e6:.0f} MB[/green]")
+
+
+@app.command()
 def serve(host: str = typer.Option("127.0.0.1", "--host"),
           port: int = typer.Option(8099, "--port"),
           reload: bool = typer.Option(False, "--reload")) -> None:

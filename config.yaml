@@ -140,6 +140,11 @@ video:
   # videos are stitched in batches first. Cross-fading is duration-exact either
   # way, so captions stay in sync.
   render_segment_max: 40
+  # Per-scene clips encoded at once. 0 = derive from the CPU count, leaving one
+  # core for the API. Set it explicitly on a small cloud instance: the Oracle
+  # Always Free Ampere shape is 2 cores since June 2026, and three concurrent
+  # x264 encodes there are slower than two.
+  render_parallel: 0
   kenburns: true
   hardware_accel: auto           # auto | none | nvenc | qsv | amf
   # Named style template (spec section 45). Leave empty to auto-select from

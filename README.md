@@ -90,6 +90,8 @@ Then start the backend the app talks to:
 ```
 
 Full instructions: [docs/SETUP.md](docs/SETUP.md).
+Run it without your laptop: [deploy/oracle/README.md](deploy/oracle/README.md)
+— including an honest assessment of whether the free tier can keep up.
 Android build: [docs/SETUP.md](docs/SETUP.md#android-app).
 YouTube credentials: [docs/YOUTUBE_SETUP.md](docs/YOUTUBE_SETUP.md).
 

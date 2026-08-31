@@ -1,0 +1,49 @@
+# AutoTube AI - HTTPS reverse proxy.
+#
+# Caddy obtains and renews a Let's Encrypt certificate automatically, which is
+# why this exists rather than exposing uvicorn directly:
+#
+#   * The API token is a bearer credential. Over plain HTTP on the public
+#     internet it is readable by anyone on the path.
+#   * The Android RELEASE build refuses cleartext by design
+#     (see app/src/main/res/xml/network_security_config.xml). Only the debug
+#     build permits it, and only for LAN development. A real hostname with a
+#     real certificate is what makes a release build usable.
+#
+# Requires ports 80 AND 443 open in BOTH the Oracle VCN Security List and the
+# instance's own iptables rules. Port 80 is not optional - the ACME HTTP
+# challenge uses it, and without it certificate issuance fails.
+
+@DOMAIN@ {
+	encode zstd gzip
+
+	# Video previews are large; the phone streams them from /jobs/*/file/*.
+	# Buffering them in the proxy would add latency and memory for no gain.
+	reverse_proxy 127.0.0.1:@PORT@ {
+		flush_interval -1
+		transport http {
+			# A render can take an hour and the request that starts it returns
+			# immediately, but uploads of a finished video do stream through.
+			read_timeout 30m
+			write_timeout 30m
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	# The app's own token bucket is the real rate limiter; this is just a log
+	# to look at when something behaves oddly.
+	log {
+		output file /var/log/caddy/autotube.log {
+			roll_size 10MiB
+			roll_keep 3
+		}
+		format console
+	}
+}

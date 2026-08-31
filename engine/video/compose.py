@@ -26,6 +26,7 @@ total video length equals the total audio length exactly - see `_clip_lengths`.
 """
 from __future__ import annotations
 
+import os
 import shutil
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
@@ -85,6 +86,17 @@ class VideoComposer:
         # command line at 32,767 characters and each input costs a path plus a
         # filter node, so a long-form video would fail to launch at all.
         self.segment_max = max(4, int(cfg.get("video.render_segment_max", 40)))
+        # How many per-scene clips to encode at once. This used to be a
+        # hard-coded 3, which is fine on a laptop and actively harmful on the
+        # 2-core Ampere instance the Oracle free tier now gives you: three
+        # concurrent x264 encodes, each internally threaded, just thrash.
+        # Leave one core for the API so the phone still gets responses while a
+        # render is running.
+        configured = int(cfg.get("video.render_parallel", 0))
+        if configured > 0:
+            self.render_parallel = configured
+        else:
+            self.render_parallel = max(1, min(4, (os.cpu_count() or 2) - 1))
 
     # ------------------------------------------------------------------
     # Geometry
@@ -158,8 +170,11 @@ class VideoComposer:
         return (f"zoompan=z={z}:x={x}:y={y}:d=1:s={w}x{h}:fps={self.fps}")
 
     def render_scene_clips(self, timings: list[SceneTiming], out_dir: Path,
-                           w: int, h: int, parallel: int = 3) -> list[Path]:
+                           w: int, h: int,
+                           parallel: int | None = None) -> list[Path]:
         ensure_dir(out_dir)
+        if parallel is None:
+            parallel = self.render_parallel
         lengths = self._clip_lengths([t.duration for t in timings])
 
         def one(args: tuple[SceneTiming, float]) -> Path:
@@ -183,7 +198,8 @@ class VideoComposer:
         with ThreadPoolExecutor(max_workers=max(1, parallel)) as pool:
             clips = list(pool.map(one, list(zip(timings, lengths))))
         log_event("VIDEO", "scene clips rendered", clips=len(clips),
-                  transition=f"{self.transition_dur:.2f}s")
+                  transition=f"{self.transition_dur:.2f}s",
+                  parallel=parallel, cores=os.cpu_count())
         return clips
 
     # ------------------------------------------------------------------
