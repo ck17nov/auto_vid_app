@@ -1,0 +1,37 @@
+# ---- Python ----
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# ---- Secrets (never commit) ----
+.env
+token*.json
+client_secret*.json
+
+# ---- Runtime output ----
+workspace/
+*.db
+*.db-journal
+
+# ---- Android ----
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+*.apk
+*.aab
+
+# ---- Large / user-supplied assets ----
+# Order matters in .gitignore: the negation must follow the pattern it undoes.
+assets/music/*
+!assets/music/.gitkeep
+assets/piper/
+
+# Copied system fonts are not redistributable - keep them local.
+assets/fonts/ariblk.ttf
+assets/fonts/impact.ttf
+assets/fonts/seguibl.ttf
+assets/fonts/DejaVuSans-Bold.ttf
+assets/fonts/LiberationSans-Bold.ttf

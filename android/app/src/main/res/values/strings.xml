@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">AutoTube AI</string>
+    <string name="dashboard">Dashboard</string>
+    <string name="create">Create</string>
+    <string name="research">Research</string>
+    <string name="content">Content</string>
+    <string name="preview">Preview</string>
+    <string name="scheduler">Scheduler</string>
+    <string name="analytics">Analytics</string>
+    <string name="settings">Settings</string>
+</resources>

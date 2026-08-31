@@ -1,0 +1,146 @@
+# ============================================================
+#  AutoTube AI - master configuration
+#  Env vars override these values (see .env.example).
+#  Anything secret belongs in .env / Android Keystore, NOT here.
+# ============================================================
+
+app:
+  name: AutoTube AI
+  # LOCAL | CLOUD | HYBRID  -> where heavy work runs
+  mode: LOCAL
+  workspace: ./workspace
+
+timezone:
+  default: Asia/Kolkata
+
+youtube:
+  upload_enabled: false          # master safety switch
+  default_privacy: private       # private | unlisted | public
+  default_category_id: "27"      # 27 = Education, 28 = Science & Technology
+  # Default daily API quota for a new Google Cloud project.
+  daily_quota_units: 10000
+  # Real costs from the official docs (units):
+  quota_costs:
+    search_list: 100
+    videos_list: 1
+    channels_list: 1
+    video_insert: 1600
+    thumbnail_set: 50
+    captions_insert: 400
+  made_for_kids: false
+  # YouTube requires disclosure of realistic synthetic media.
+  synthetic_disclosure: true
+
+research:
+  max_results_per_query: 25
+  max_queries: 3                 # 3 x 100 units = 300 units per research run
+  published_within_days: 90
+  min_views: 5000
+  region_code: IN
+  relevance_language: en
+  cache_ttl_hours: 12
+
+scoring:
+  # ViralScore weights - fully configurable (spec section 4).
+  weights:
+    view_velocity: 0.28
+    engagement: 0.18
+    recency: 0.14
+    topic_momentum: 0.12
+    channel_normalized: 0.16
+    title_pattern: 0.07
+    content_gap: 0.05
+  breakout_ratio_threshold: 2.5  # views / expected-views-for-channel
+
+content:
+  llm_provider_order: [groq, gemini, ollama, template]
+  temperature: 0.85
+  max_ideas: 10
+  fact_check_required_niches: [science, technology, finance, health, history, space, news]
+
+tts:
+  provider_order: [edge, piper, gtts]
+  voice_gender: female
+  # edge-tts voice ids. en-IN-NeerjaNeural = Indian English female.
+  voice_map:
+    en: en-US-AriaNeural
+    en-IN: en-IN-NeerjaNeural
+    hi: hi-IN-SwaraNeural
+    ta: ta-IN-PallaviNeural
+    te: te-IN-ShrutiNeural
+    es: es-ES-ElviraNeural
+  rate: "+8%"
+  pitch: "+0Hz"
+  target_lufs: -14.0
+
+visuals:
+  provider_order: [pollinations, pexels, procedural]
+  image_width: 1080
+  image_height: 1920
+  # Never reuse copyrighted YouTube footage - see CONTENT_POLICY.md
+  allow_stock_apis: true
+  pollinations_model: flux
+  # Concurrency is what trips free-tier rate limits; 2 is the sweet spot.
+  parallel: 2
+  transient_retries: 3
+  retry_backoff_seconds: 5
+
+video:
+  default_resolution: 1080x1920
+  longform_resolution: 1920x1080
+  default_fps: 30
+  crf: 19
+  # x264 preset. 'fast' is ~2x quicker than 'medium' with a negligible
+  # quality difference at CRF 19; use 'slow' only if you are archiving.
+  preset: fast
+  audio_bitrate: 192k
+  # Music arrives normalised to -23 LUFS, so these are relative trims.
+  music_volume_db: -9
+  duck_music_db: -11
+  sfx_volume_db: -4
+  transition: fade
+  transition_duration: 0.35
+  kenburns: true
+  hardware_accel: auto           # auto | none | nvenc | qsv | amf
+  # Named style template (spec section 45). Leave empty to auto-select from
+  # the niche + style text. One of: FAST_FACTS, TECH_NEWS,
+  # SCIENCE_EXPLAINER, STORYTELLING, TOP_5, MYSTERY, KIDS_STORY,
+  # EDUCATIONAL, MOTIVATIONAL
+  style_template: ""
+
+captions:
+  enabled: true
+  style: karaoke                 # karaoke | block | none
+  font: Arial Black
+  font_size: 112
+  primary_color: "&H00FFFFFF"
+  highlight_color: "&H0000E5FF"
+  outline: 7
+  shadow: 3
+  # Shorts-safe margins (fraction of height) - avoids YouTube UI overlays.
+  safe_top: 0.12
+  safe_bottom: 0.22
+  max_words_on_screen: 3
+  max_chars_on_screen: 20
+  uppercase: true
+
+quality:
+  minimum_score: 80
+  max_silence_seconds: 1.6
+  min_audio_rms_db: -40.0
+  duration_tolerance_pct: 25
+
+originality:
+  # Max 4-gram Jaccard similarity allowed against any researched text.
+  max_similarity: 0.30
+
+automation:
+  approval_required: true        # APPROVAL MODE is the default (spec section 24)
+  daily_video_limit: 3
+  max_retries: 3
+  retry_backoff_seconds: 20
+  # Anti-spam (spec section 46)
+  duplicate_similarity_threshold: 0.80
+  stop_after_similar_videos: 3
+
+dry_run: true                    # no upload, full artifact generation

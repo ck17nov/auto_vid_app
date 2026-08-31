@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  HTTPS is required everywhere by default.
+
+  Cleartext is permitted ONLY for local development addresses, because during
+  setup the backend usually runs on the developer's own machine over plain HTTP
+  on the LAN. Anything on the public internet must be HTTPS (spec section 31).
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <!-- Host machine as seen from the Android emulator -->
+        <domain includeSubdomains="false">10.0.2.2</domain>
+        <!-- Common private LAN ranges for a phone talking to a local PC -->
+        <domain includeSubdomains="true">192.168.0.0</domain>
+        <domain includeSubdomains="true">192.168.1.0</domain>
+    </domain-config>
+</network-security-config>

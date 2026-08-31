@@ -1,0 +1,25 @@
+# ---- AutoTube AI backend requirements (all free / open-source) ----
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.1
+PyYAML==6.0.2
+tzdata==2025.1            # Windows has no system tz database; required for scheduling
+httpx==0.28.1
+requests==2.32.3
+Pillow==11.1.0
+numpy==2.2.1
+typer==0.15.1
+rich==13.9.4
+python-dotenv==1.0.1
+# --- TTS (free, no key) ---
+edge-tts==7.0.0
+gTTS==2.5.4
+# --- YouTube (official APIs) ---
+google-api-python-client==2.159.0
+google-auth==2.37.0
+google-auth-oauthlib==1.2.1
+google-auth-httplib2==0.2.0
+# --- tests ---
+pytest==8.3.4
+pytest-asyncio==0.25.2
