@@ -51,9 +51,20 @@ TRANSITIONS = ["fade", "fade", "smoothleft", "fade", "slideup", "fade"]
 @dataclass
 class SceneTiming:
     index: int
-    image: Path
+    image: Path              # a still OR a stock video clip - see `is_video`
     duration: float          # narration span this scene owns (incl. trailing gap)
     motion: str = "zoom_in"
+
+    @property
+    def is_video(self) -> bool:
+        """True when the visual is real footage rather than a still.
+
+        Ken Burns on a good photo is a legitimate look, but it is not motion,
+        and a video made entirely of panned stills reads as a slideshow. When
+        a stock video provider supplies a clip it is used as-is: no zoompan,
+        because the footage already moves.
+        """
+        return self.image.suffix.lower() in {".mp4", ".mov", ".webm", ".mkv"}
 
 
 @dataclass
@@ -181,6 +192,23 @@ class VideoComposer:
             timing, length = args
             frames = max(int(round(length * self.fps)), 2)
             target = out_dir / f"clip_{timing.index:02d}.mp4"
+
+            if timing.is_video:
+                # Real footage: cover-crop to the frame and let it move on its
+                # own. `-stream_loop -1` covers the case where the clip is
+                # shorter than the scene; `-t` then cuts it to length. No
+                # zoompan - adding a pan on top of camera motion looks seasick.
+                vf = (f"scale={w}:{h}:force_original_aspect_ratio=increase:"
+                      f"flags=lanczos,crop={w}:{h},setsar=1,"
+                      f"fps={self.fps},format=yuv420p")
+                run([ffmpeg_bin(), "-y", "-loglevel", "error",
+                     "-stream_loop", "-1", "-t", f"{length:.3f}",
+                     "-i", str(timing.image),
+                     "-vf", vf, "-frames:v", str(frames),
+                     "-c:v", "libx264", "-crf", "14", "-preset", "veryfast",
+                     "-pix_fmt", "yuv420p", "-an", str(target)], timeout=1800)
+                return target
+
             # Slight oversize + lanczos guarantees zoompan has real pixels.
             src_w, src_h = int(w * 1.18) & ~1, int(h * 1.18) & ~1
             vf = (f"scale={src_w}:{src_h}:force_original_aspect_ratio=increase:"

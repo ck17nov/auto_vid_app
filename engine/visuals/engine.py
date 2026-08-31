@@ -12,7 +12,8 @@ from ..core.models import Asset, Scene
 from ..core.util import ensure_dir, safe_write_json, sha1
 from .base import VisualRequest
 from .procedural import ProceduralProvider
-from .providers import PexelsProvider, PixabayProvider, PollinationsProvider
+from .providers import (PexelsProvider, PexelsVideoProvider, PixabayProvider,
+                        PollinationsProvider)
 
 
 class VisualEngine:
@@ -28,15 +29,18 @@ class VisualEngine:
         order = list(cfg.get("visuals.provider_order", ["pollinations", "procedural"]))
         allow_stock = bool(cfg.get("visuals.allow_stock_apis", True))
         registry = {
+            "pexels_video": lambda: PexelsVideoProvider(cfg.secret("PEXELS_API_KEY")),
             "pexels": lambda: PexelsProvider(cfg.secret("PEXELS_API_KEY")),
             "pixabay": lambda: PixabayProvider(cfg.secret("PIXABAY_API_KEY")),
             "pollinations": lambda: PollinationsProvider(
                 model=str(cfg.get("visuals.pollinations_model", "flux"))),
             "procedural": ProceduralProvider,
         }
-        # Stock photos are sharper -> try them first when keys exist.
+        # Stock photos are sharper -> try them first when keys exist. Stock
+        # VIDEO goes ahead of everything: real footage is the difference
+        # between a video and a narrated slideshow, and it costs the same key.
         if allow_stock:
-            for stock in ("pixabay", "pexels"):
+            for stock in ("pixabay", "pexels", "pexels_video"):
                 if stock not in order:
                     order.insert(0, stock)
         chain = [registry[name]() for name in order if name in registry]
@@ -48,7 +52,8 @@ class VisualEngine:
     def generate(self, scenes: list[Scene], out_dir: Path, *, style: str = "",
                  made_for_kids: bool = False, width: int | None = None,
                  height: int | None = None,
-                 parallel: int | None = None) -> list[Asset]:
+                 parallel: int | None = None,
+                 durations: list[float] | None = None) -> list[Asset]:
         """Fetch/generate one conditioned image per scene.
 
         Scenes are processed concurrently because the network providers are
@@ -88,6 +93,10 @@ class VisualEngine:
                 width=w, height=h, style=style,
                 seed=int(sha1(f"{scene.index}{scene.visual_prompt}")[:6], 16),
                 made_for_kids=made_for_kids,
+                # Lets the video provider avoid a 2-second clip under an
+                # 8-second scene, which loops visibly.
+                min_seconds=(durations[scene.index]
+                             if durations and scene.index < len(durations) else 0.0),
             )
             target = out_dir / f"image_{scene.index:02d}.jpg"
             errors: list[str] = []
@@ -108,7 +117,10 @@ class VisualEngine:
                 for attempt in range(1, attempts + 1):
                     try:
                         asset = provider.fetch(req, target)
-                        scene.asset_path = str(target)
+                        # NOT `target`: the video provider writes an .mp4
+                        # beside the .jpg path it was handed, so the asset's
+                        # own filename is the authoritative one.
+                        scene.asset_path = str(out_dir / asset.asset)
                         return asset
                     except Exception as exc:
                         transient = _is_transient(exc)
@@ -151,6 +163,8 @@ class VisualEngine:
             assets = list(pool.map(work, scenes))
 
         for scene, asset in zip(scenes, assets):
+            # The video provider writes an .mp4 next to the .jpg path it was
+            # handed, so the asset's own filename is authoritative here.
             scene.asset_path = str(out_dir / asset.asset)
 
         self.write_manifest(assets, out_dir.parent / "asset_manifest.json")

@@ -1425,8 +1425,8 @@ class TestMusicBedIsNotAToneGenerator:
         many harmonics each voice has."""
         from engine.video import music
         code = self._code(music.synth_bed)
-        assert "voice_gain = -11.0" in code, \
-            "the chord must sit back; leading with pitch is what beeped"
+        assert "voice_gain = -34.0" in code, \
+            "the chord must sit far back; leading with pitch is what beeped"
         assert "[rumble]" in code, "the noise body should be layered"
 
     def test_the_bed_is_measurably_less_tonal(self, tmp_path):
@@ -1447,3 +1447,109 @@ class TestMusicBedIsNotAToneGenerator:
         concentration = float(np.sort(spec)[-8:].sum() / spec.sum())
         assert concentration < 0.20, (
             f"{concentration * 100:.1f}% of energy in 8 bins - that is a tone")
+
+        # Proportion alone is not enough, and assuming it was is how the first
+        # attempt failed. It cut the share from 29% to 14.5% while the ABSOLUTE
+        # tonal peak stayed at -31 dBFS and the bed grew 1.6 dB louder - so the
+        # beep was exactly as audible and simply had more around it. Check the
+        # level a listener actually hears.
+        freqs = np.fft.rfftfreq(len(seg), 1 / 48000)
+        peaks = []
+        for f in (110.0, 130.81, 164.81, 220.0):
+            for mult in (1, 2, 3):
+                band = (freqs > f * mult - 3) & (freqs < f * mult + 3)
+                if band.any():
+                    peaks.append(spec[band].max())
+        scale = 32768.0 * len(seg) / 2
+        tonal_dbfs = 20 * np.log10(max(peaks) / scale + 1e-12)
+        rms_dbfs = 20 * np.log10(
+            np.sqrt(((seg / 32768.0) ** 2).mean()) + 1e-12)
+        assert tonal_dbfs < -40.0, (
+            f"loudest tone at {tonal_dbfs:.1f} dBFS is audible as a pitch")
+        assert tonal_dbfs - rms_dbfs < -14.0, (
+            f"tone is only {rms_dbfs - tonal_dbfs:.1f} dB below the bed")
+
+
+# ==========================================================================
+# Stock video: real footage instead of panned stills
+# ==========================================================================
+class TestStockVideo:
+    """Ken Burns on a good photo is a legitimate look, but it is not motion.
+
+    "I only see stock images being used" is a fair thing to ask of something
+    calling itself a video generator, so a scene can now be real footage.
+    """
+
+    def test_scene_timing_recognises_footage(self):
+        for suffix, expected in ((".mp4", True), (".mov", True), (".webm", True),
+                                 (".jpg", False), (".png", False), (".JPG", False)):
+            t = SceneTiming(index=0, image=Path(f"a{suffix}"), duration=3.0)
+            assert t.is_video is expected, suffix
+
+    def test_the_video_provider_is_tried_before_stills(self, cfg, monkeypatch):
+        """Footage first: it costs the same key and looks materially better."""
+        monkeypatch.setenv("PEXELS_API_KEY", "test-key")
+        from engine.visuals.engine import VisualEngine
+        names = [p.name for p in VisualEngine(load_config()).providers]
+        assert "pexels_video" in names
+        assert names.index("pexels_video") < names.index("pexels")
+        assert names[-1] == "procedural", "the floor must stay last"
+
+    def test_footage_is_not_given_a_ken_burns_pan(self, cfg, tmp_path):
+        """Panning across footage that already moves looks seasick."""
+        import inspect
+        from engine.video import compose
+        src = inspect.getsource(compose.VideoComposer.render_scene_clips)
+        branch = src.split("if timing.is_video:")[1].split("return target")[0]
+        # Comments in that branch explain why zoompan is absent, so match on
+        # code only.
+        code = "\n".join(line for line in branch.splitlines()
+                         if not line.lstrip().startswith("#"))
+        assert "zoompan" not in code, "footage must not be panned as well"
+        assert "stream_loop" in code, \
+            "a clip shorter than the scene must loop rather than freeze"
+
+    def test_a_short_clip_still_fills_the_scene(self, cfg, tmp_path):
+        """Real check with ffmpeg: a 2s clip under a 5s scene must not end early."""
+        source = tmp_path / "short.mp4"
+        subprocess.run(
+            [ffmpeg_bin(), "-y", "-loglevel", "error", "-f", "lavfi",
+             "-i", "testsrc=size=640x360:rate=30:duration=2",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source)],
+            check=True, timeout=180)
+        assert probe_duration(source) < 2.5
+
+        comp = VideoComposer(cfg)
+        timings = [SceneTiming(index=0, image=source, duration=5.0)]
+        clips = comp.render_scene_clips(timings, tmp_path / "out", 320, 240,
+                                        parallel=1)
+        assert probe_duration(clips[0]) == pytest.approx(5.0, abs=0.25), \
+            "the clip did not loop to cover the scene"
+
+    def test_footage_is_cropped_to_the_frame(self, cfg, tmp_path):
+        """A landscape clip in a portrait video must cover, not letterbox."""
+        source = tmp_path / "wide.mp4"
+        subprocess.run(
+            [ffmpeg_bin(), "-y", "-loglevel", "error", "-f", "lavfi",
+             "-i", "testsrc=size=1280x720:rate=30:duration=3",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source)],
+            check=True, timeout=180)
+
+        comp = VideoComposer(cfg)
+        clips = comp.render_scene_clips(
+            [SceneTiming(index=0, image=source, duration=2.0)],
+            tmp_path / "out", 320, 568, parallel=1)
+        stream = next(s for s in comp.probe(clips[0])["streams"]
+                      if s["codec_type"] == "video")
+        assert (stream["width"], stream["height"]) == (320, 568)
+
+    def test_stills_still_get_their_pan(self, cfg, tmp_path):
+        """The photo path must be untouched by the video branch."""
+        from PIL import Image
+        img = tmp_path / "still.png"
+        Image.new("RGB", (1280, 720), (40, 80, 120)).save(img)
+        comp = VideoComposer(cfg)
+        clips = comp.render_scene_clips(
+            [SceneTiming(index=0, image=img, duration=2.0, motion="zoom_in")],
+            tmp_path / "out", 320, 240, parallel=1)
+        assert probe_duration(clips[0]) == pytest.approx(2.0, abs=0.2)

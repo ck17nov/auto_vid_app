@@ -24,6 +24,10 @@ class VisualRequest:
     style: str = ""
     seed: int = 0
     made_for_kids: bool = False
+    # How long this scene is on screen. Only the video provider uses it, to
+    # avoid picking a 2-second clip for an 8-second scene and looping it
+    # visibly.
+    min_seconds: float = 0.0
 
 
 class VisualProvider(Protocol):

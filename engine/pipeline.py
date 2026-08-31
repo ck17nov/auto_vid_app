@@ -469,9 +469,15 @@ class Pipeline:
         assign_motion(scenes, self._motion_cycle)
         w, h = self.composer.resolution(request.video_format)
 
+        # Scene durations were measured during the voice stage and written back
+        # onto the script. Passing them lets the stock-video provider skip
+        # clips shorter than the scene, which would otherwise loop visibly.
+        durations = [s.duration or 0.0 for s in scenes]
+
         assets = self._retry("visuals", lambda: self.visual_engine.generate(
             scenes, job_dir / "assets", style=request.style,
-            made_for_kids=profile.made_for_kids, width=w, height=h), job)
+            made_for_kids=profile.made_for_kids, width=w, height=h,
+            durations=durations), job)
 
         script.scenes = [s.to_dict() for s in scenes]
         job.script = script.to_dict()

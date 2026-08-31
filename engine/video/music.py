@@ -123,10 +123,25 @@ def synth_bed(duration: float, out_path: Path, *, mood: str = "cinematic",
                 f"+0.09*sin(2*PI*{h3:.3f}*t)")
         inputs += ["-f", "lavfi", "-i",
                    f"aevalsrc='{wave}':d={dur:.2f}:s=48000"]
-        # The chord sits WELL back. Tonal content is colour here, not the body
-        # of the bed - a pad led by sustained pitches is what read as a beep,
-        # regardless of how many harmonics each pitch has.
-        voice_gain = -11.0 - i * 3.4
+        # The chord is deliberately near-subliminal.
+        #
+        # Two rounds of measurement got here. At -11 dB the loudest tonal peak
+        # was UNCHANGED at -31 dBFS while the bed got 1.6 dB louder overall, so
+        # the beep stayed exactly as audible and gained company. The cause is
+        # loudnorm: K-weighting discounts low frequencies, the noise layers were
+        # all under 700 Hz, so loudnorm saw a quiet signal and boosted
+        # everything including the tone. Lowering the chord alone does not fix
+        # that either - loudnorm simply boosts harder - which is why the noise
+        # also moved into a band K-weighting counts.
+        #
+        # Measured sweep of this gain, tonal peak vs bed RMS:
+        #     -22 dB  ->  -34.7 dBFS,  -9.5 dB below the bed
+        #     -26 dB  ->  -37.4 dBFS, -11.3 dB
+        #     -30 dB  ->  -40.7 dBFS, -14.2 dB
+        #     -34 dB  ->  -45.1 dBFS, -18.4 dB   <- here
+        # Against the original -31.3 dBFS at 6.1 dB below the bed, that is
+        # 13.8 dB less tone. It is colour now, not a pitch you can name.
+        voice_gain = -34.0 - i * 4.0
         trem = spec["trem"] * rng.uniform(0.8, 1.25) + i * 0.013
         chains.append(
             f"[{i}:a]volume={voice_gain:.1f}dB,"
@@ -139,8 +154,11 @@ def synth_bed(duration: float, out_path: Path, *, mood: str = "cinematic",
     noise_idx = len(freqs)
     inputs += ["-f", "lavfi", "-i",
                f"anoisesrc=color=brown:duration={dur:.2f}:sample_rate=48000:amplitude=0.7"]
-    chains.append(f"[{noise_idx}:a]lowpass=f={min(spec['lowpass'], 700)},"
-                  f"volume=-5dB,tremolo=f=0.1:d=0.55[air]")
+    # Mid-band, not sub-bass: this is what loudnorm measures, so the bed
+    # reaches its target level honestly instead of being boosted to get there.
+    chains.append(f"[{noise_idx}:a]highpass=f=200,"
+                  f"lowpass=f={min(spec['lowpass'], 1800)},"
+                  f"volume=-4dB,tremolo=f=0.1:d=0.55[air]")
 
     rumble_idx = noise_idx + 1
     inputs += ["-f", "lavfi", "-i",

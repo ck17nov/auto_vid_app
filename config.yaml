@@ -114,7 +114,11 @@ tts:
   target_lufs: -14.0
 
 visuals:
-  provider_order: [pollinations, pexels, procedural]
+  # `pexels_video` is inserted ahead of these automatically when a Pexels key
+  # is set (same key as the photos). Real footage is the difference between a
+  # video and a narrated slideshow. Remove it from the order below to force
+  # stills only.
+  provider_order: [pexels_video, pexels, pixabay, pollinations, procedural]
   image_width: 1080
   image_height: 1920
   # Never reuse copyrighted YouTube footage - see CONTENT_POLICY.md
