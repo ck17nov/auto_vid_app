@@ -90,12 +90,64 @@ id -u "$APP_USER" >/dev/null 2>&1 || useradd --system --create-home \
 
 # --------------------------------------------------------------------------
 say "Fetching the application"
+# This script runs as root under sudo, so root's ~/.ssh is /root/.ssh - but the
+# deploy key was generated in the LOGIN user's home. Without this, an SSH clone
+# fails with "Permission denied (publickey)" even though the key exists and
+# works when you test it by hand, which is a genuinely confusing way to lose an
+# hour. Point git at the invoking user's key explicitly.
+if [[ "$REPO_URL" == git@* || "$REPO_URL" == ssh://* ]]; then
+  KEY_OWNER_HOME="$(getent passwd "${SUDO_USER:-root}" | cut -d: -f6)"
+  for candidate in "$KEY_OWNER_HOME/.ssh/autotube" "$KEY_OWNER_HOME/.ssh/id_ed25519" \
+                   "$KEY_OWNER_HOME/.ssh/id_rsa"; do
+    if [[ -f "$candidate" ]]; then
+      export GIT_SSH_COMMAND="ssh -i $candidate -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+      echo "using SSH key $candidate"
+      break
+    fi
+  done
+  if [[ -z "${GIT_SSH_COMMAND:-}" ]]; then
+    warn "No SSH key found under $KEY_OWNER_HOME/.ssh - the clone will likely fail."
+    warn "See 'Give the server read access to the repo' in deploy/oracle/README.md"
+  fi
+fi
 if [[ -d "$APP_DIR/.git" ]]; then
   git -C "$APP_DIR" fetch --quiet origin
   git -C "$APP_DIR" reset --hard --quiet origin/main
 else
   mkdir -p "$APP_DIR"
-  git clone --quiet "$REPO_URL" "$APP_DIR"
+  # The repository is PRIVATE by default, so an anonymous HTTPS clone fails
+  # here with an authentication prompt that has no terminal to read from.
+  # GIT_TERMINAL_PROMPT=0 turns that hang into an immediate, explainable error.
+  if ! GIT_TERMINAL_PROMPT=0 git clone --quiet "$REPO_URL" "$APP_DIR" 2>/tmp/clone.err; then
+    echo
+    warn "Could not clone $REPO_URL"
+    sed 's/^/    /' /tmp/clone.err >&2
+    cat <<'CLONEHELP' >&2
+
+  If the repository is private (it is, unless you changed it), pick one:
+
+  1. Deploy key - read-only, scoped to this one repo, and the tidiest option:
+
+       ssh-keygen -t ed25519 -C "oracle-autotube" -f ~/.ssh/autotube -N ""
+       cat ~/.ssh/autotube.pub
+
+     Add that as a DEPLOY KEY on GitHub:
+       Settings -> Deploy keys -> Add deploy key  (leave write access OFF)
+
+     Then re-run with the SSH URL:
+       sudo bash setup.sh --repo git@github.com:ck17nov/auto_vid_app.git --domain ...
+
+  2. Personal access token - quicker, but the token ends up in the git remote
+     on disk. Use a fine-grained token limited to this repository, read-only:
+
+       sudo bash setup.sh --repo https://<TOKEN>@github.com/ck17nov/auto_vid_app.git ...
+
+  3. Make the repository public, then no credentials are needed at all.
+     Rotate AUTOTUBE_API_TOKEN first if you do.
+
+CLONEHELP
+    exit 1
+  fi
 fi
 chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 

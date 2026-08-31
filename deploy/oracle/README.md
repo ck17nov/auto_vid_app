@@ -110,14 +110,48 @@ for LAN development.
 
 *(Prefer no public exposure at all? See "Tailscale instead" below.)*
 
-## Step 5 — Run the setup script
+## Step 5 — Give the server read access to the repo
 
-SSH in, then:
+**The repository is private**, so the instance cannot clone it anonymously.
+A read-only deploy key is the tidiest answer — scoped to this one repo, no
+write access, and nothing secret ends up inside the git remote on disk.
+
+On the instance:
+
+```bash
+ssh-keygen -t ed25519 -C "oracle-autotube" -f ~/.ssh/autotube -N ""
+cat ~/.ssh/autotube.pub
+```
+
+Paste that key into GitHub: **repo → Settings → Deploy keys → Add deploy key**.
+Leave *Allow write access* **off**.
+
+Then tell SSH to use it:
+
+```bash
+cat >> ~/.ssh/config <<'EOF'
+Host github.com
+  IdentityFile ~/.ssh/autotube
+  IdentitiesOnly yes
+EOF
+```
+
+Check it before going further — a failed clone at the next step is otherwise
+the first you hear of it:
+
+```bash
+ssh -T git@github.com
+```
+
+*(A fine-grained read-only PAT works too, but it lives in the remote URL on
+disk. Making the repo public also works — rotate `AUTOTUBE_API_TOKEN` first.)*
+
+## Step 6 — Run the setup script
 
 ```bash
 sudo apt-get update -qq && sudo apt-get install -y -qq git
-git clone https://github.com/ck17nov/auto_vid_app.git /tmp/autotube
-sudo bash /tmp/autotube/deploy/oracle/setup.sh --domain autotube-ck.duckdns.org
+git clone git@github.com:ck17nov/auto_vid_app.git /tmp/autotube
+sudo bash /tmp/autotube/deploy/oracle/setup.sh --repo git@github.com:ck17nov/auto_vid_app.git --domain autotube-ck.duckdns.org
 ```
 
 It installs Python, ffmpeg, a `autotube` service account, the venv, a hardened
@@ -130,7 +164,7 @@ proves very little: a build without libass lists the `subtitles` filter and
 then renders every video with no captions, failing at the last step after the
 voice and images are already done.
 
-## Step 6 — Add your keys
+## Step 7 — Add your keys
 
 The script generates a fresh `AUTOTUBE_API_TOKEN` and prints it. Add the rest:
 
@@ -140,7 +174,7 @@ sudo systemctl restart autotube
 sudo -u autotube /opt/autotube/.venv/bin/python -m backend.cli doctor
 ```
 
-## Step 7 — Point the phone at it
+## Step 8 — Point the phone at it
 
 In the app: **Settings → Backend URL** → `https://autotube-ck.duckdns.org/`,
 and the `AUTOTUBE_API_TOKEN` from the server (**not** your laptop's — they are
@@ -149,7 +183,7 @@ different secrets). Tap **Test connection**.
 Your Google Cloud **Android** OAuth client is unchanged; it is tied to the
 app's package and signing certificate, not to the backend address.
 
-## Step 8 — Tune for 2 cores
+## Step 9 — Tune for 2 cores
 
 ```yaml
 video:
@@ -171,8 +205,9 @@ sudo systemctl restart autotube               # after editing .env
 df -h /                                       # watch the disk
 ```
 
-**Prune old output.** Each finished job is 30-150 MB and the boot volume will
-fill. Published videos live on YouTube, so the local copy is only for review:
+**Prune old output.** Each finished job is 30-150 MB - and more now that
+scenes use stock FOOTAGE rather than stills, since each clip is 5-15 MB before
+it is even rendered. The boot volume will fill. Published videos live on YouTube, so the local copy is only for review:
 
 ```bash
 sudo -u autotube /opt/autotube/.venv/bin/python -m backend.cli prune --videos-only --keep-days 7 --yes
