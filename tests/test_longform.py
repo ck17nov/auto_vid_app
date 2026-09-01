@@ -1553,3 +1553,105 @@ class TestStockVideo:
             [SceneTiming(index=0, image=img, duration=2.0, motion="zoom_in")],
             tmp_path / "out", 320, 240, parallel=1)
         assert probe_duration(clips[0]) == pytest.approx(2.0, abs=0.2)
+
+
+# ==========================================================================
+# Kids flashcard animation
+# ==========================================================================
+class TestKidsAnimation:
+    """Purpose-built motion graphics instead of a stock photo search.
+
+    For "science" or "nature" a photograph IS the subject. For a kids alphabet
+    video it is wrong in a way no tuning fixes: searching "ant leaf bubble"
+    returns a macro shot of a real ant - a fine nature clip, and nothing like
+    children's television.
+    """
+
+    def _req(self, prompt, keywords, **kw):
+        from engine.visuals.base import VisualRequest
+        return VisualRequest(scene_index=0, prompt=prompt, keywords=keywords,
+                             width=320, height=568, made_for_kids=True, **kw)
+
+    @pytest.mark.parametrize("prompt,keywords,expected", [
+        ("the letter B and a bicycle", ["letter b", "bicycle"], "B"),
+        ("the sound of \"B\" in words", ["words"], "B"),
+        ("number 7 counting apples", ["apples"], "7"),
+        ("a boat on the ocean", ["boat"], ""),
+    ])
+    def test_the_letter_is_only_taken_when_unambiguous(self, prompt, keywords,
+                                                       expected):
+        from engine.visuals.kids_animation import headline_letter
+        assert headline_letter(self._req(prompt, keywords)) == expected
+
+    def test_a_bare_pronoun_is_not_mistaken_for_a_letter(self):
+        """Real output: a scene about children laughing rendered a giant "I".
+
+        The old fallback matched any lone capital, which catches the pronoun
+        "I" and the article "A". A wrong letter is worse than none.
+        """
+        from engine.visuals.kids_animation import headline_letter
+        req = self._req("children laugh together, I see them smiling",
+                        ["laugh", "children"])
+        assert headline_letter(req) == ""
+
+    def test_the_card_word_is_a_single_word(self):
+        """A scene printed "LETTER B" under the picture - keywords arrive as
+        phrases, and a two-word card reads badly."""
+        from engine.visuals.kids_animation import headline_word
+        word = headline_word(self._req("the letter B and a bicycle",
+                                       ["letter b", "bicycle"]))
+        assert " " not in word
+        assert word == "BICYCLE", "scaffolding words must lose to the subject"
+
+    def test_a_drawable_subject_is_preferred(self):
+        """A drawn apple is unambiguous where a photo of a concept is not."""
+        from engine.visuals.kids_animation import headline_word
+        assert headline_word(self._req("fruit on a table",
+                                       ["table", "apple"])) == "APPLE"
+
+    def test_every_palette_has_a_dark_ink(self):
+        """`ink` is what text is drawn in. When it was taken from the first
+        palette entry - a pale tint in several - "APPLE" came out
+        mint-on-white and was unreadable."""
+        from engine.visuals.kids_animation import PALETTES, _hex
+        for name, colours in PALETTES:
+            assert len(colours) == 4, name
+            r, g, b = _hex(colours[3])
+            luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
+            assert luma < 90, f"{name} ink is too light to read ({luma:.0f})"
+
+    @pytest.mark.slow
+    def test_it_renders_a_playable_clip_of_the_right_length(self, tmp_path):
+        from engine.visuals.kids_animation import KidsAnimationProvider
+        provider = KidsAnimationProvider(fps=24)
+        req = self._req("the letter A with an apple", ["apple"],
+                        seed=5, min_seconds=2.0)
+        asset = provider.fetch(req, tmp_path / "card.jpg")
+        clip = tmp_path / "card.mp4"
+        assert clip.exists(), "must produce video, not a still"
+        assert asset.asset.endswith(".mp4")
+        assert probe_duration(clip) == pytest.approx(2.0, abs=0.25)
+
+    @pytest.mark.slow
+    def test_the_clip_matches_the_requested_frame(self, tmp_path):
+        from engine.visuals.kids_animation import KidsAnimationProvider
+        provider = KidsAnimationProvider(fps=24)
+        provider.fetch(self._req("the letter C and a cloud", ["cloud"],
+                                 seed=2, min_seconds=1.5),
+                       tmp_path / "c.jpg")
+        streams = VideoComposer(load_config()).probe(
+            tmp_path / "c.mp4").get("streams", [])
+        video = next(s for s in streams if s.get("codec_type") == "video")
+        assert (video["width"], video["height"]) == (320, 568)
+
+    def test_it_never_needs_credentials(self):
+        from engine.visuals.kids_animation import KidsAnimationProvider
+        assert KidsAnimationProvider().available() is True
+
+    def test_it_is_only_used_for_child_directed_scenes(self, cfg):
+        """Adults get photographs; a flashcard would be patronising."""
+        from engine.visuals.engine import VisualEngine
+        engine = VisualEngine(load_config())
+        assert engine.kids_provider is not None
+        assert all(p.name != "kids_animation" for p in engine.providers), \
+            "it must be selected per request, not sit in the default chain"

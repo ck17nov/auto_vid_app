@@ -135,6 +135,12 @@ visuals:
   # under this load, which is why the trigger is a rate and not a streak.
   breaker_limit: 3
   breaker_failure_rate: 0.5
+  # Child-directed scenes get purpose-built animated flashcards - a big
+  # bouncing letter, the subject in a rounded card, chunky kid-legible type -
+  # instead of a stock photo search. Set false to fall back to photos.
+  # This is motion graphics, not character animation: it will look designed
+  # rather than scraped, but it is not Cocomelon and does not pretend to be.
+  kids_animation: true
 
 video:
   default_resolution: 1080x1920

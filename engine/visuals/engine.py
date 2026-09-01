@@ -11,6 +11,7 @@ from ..core.logging import log_event
 from ..core.models import Asset, Scene
 from ..core.util import ensure_dir, safe_write_json, sha1
 from .base import VisualRequest
+from .kids_animation import KidsAnimationProvider
 from .procedural import ProceduralProvider
 from .providers import (PexelsProvider, PexelsVideoProvider, PixabayProvider,
                         PollinationsProvider)
@@ -46,6 +47,22 @@ class VisualEngine:
         chain = [registry[name]() for name in order if name in registry]
         if not any(p.name == "procedural" for p in chain):
             chain.append(ProceduralProvider())
+
+        # Child-directed scenes get purpose-built animated flashcards instead
+        # of a photo search. Keyword-searching stock footage for "ant leaf
+        # bubble" returns a macro shot of a real ant - a good nature clip and
+        # nothing like children's television. Built here rather than added to
+        # `order` because it is selected per REQUEST (made_for_kids), not per
+        # job configuration. It borrows the first photo provider so a word it
+        # cannot draw still gets a real picture inside the card.
+        self.kids_provider = None
+        if bool(cfg.get("visuals.kids_animation", True)):
+            photo = next((p for p in chain
+                          if p.name in ("pexels", "pixabay", "pollinations")
+                          and p.available()), None)
+            self.kids_provider = KidsAnimationProvider(
+                fps=int(cfg.get("video.default_fps", 30)),
+                subject_provider=photo)
         return chain
 
     # ------------------------------------------------------------------
@@ -100,7 +117,10 @@ class VisualEngine:
             )
             target = out_dir / f"image_{scene.index:02d}.jpg"
             errors: list[str] = []
-            for provider in self.providers:
+            chain = list(self.providers)
+            if made_for_kids and self.kids_provider is not None:
+                chain.insert(0, self.kids_provider)
+            for provider in chain:
                 if provider.name in tripped:
                     errors.append(f"{provider.name}: skipped (rate limited)")
                     continue
