@@ -130,6 +130,19 @@ so plain HTTP puts it on the wire in the clear. And the Android **release**
 build refuses cleartext by design — only the debug build allows it, and only
 for LAN development.
 
+The bundled Caddyfile forces an **RSA** certificate. Let's Encrypt's new
+"Generation Y" hierarchy (from January 2026) issues ECDSA chains rooted at
+**ISRG Root YE**, which is not in Android's trust store yet; the RSA chain
+roots at **ISRG Root X1**, trusted since Android 7.1.1. Desktop `curl` accepts
+either, because desktop CA bundles are newer - so this breaks only on the
+phone, and only with an opaque TLS error. Check what you are actually serving:
+
+```bash
+echo | openssl s_client -connect YOUR.duckdns.org:443 -servername YOUR.duckdns.org 2>/dev/null | grep "i:"
+```
+
+The last issuer should be **ISRG Root X1**.
+
 *(Prefer no public exposure at all? See "Tailscale instead" below.)*
 
 ## Step 5 — Give the server read access to the repo

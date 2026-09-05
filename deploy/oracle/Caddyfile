@@ -15,6 +15,22 @@
 # challenge uses it, and without it certificate issuance fails.
 
 @DOMAIN@ {
+	# Force an RSA certificate.
+	#
+	# Let's Encrypt began issuing from a new "Generation Y" hierarchy in
+	# January 2026. Caddy's default ECDSA key type gets a chain terminating at
+	# ISRG Root YE, which is NOT yet in any major trust store - Android
+	# included - and the only trusted path is Root YE cross-signed by ISRG
+	# Root X2, which Android 13 and earlier do not carry either.
+	#
+	# The RSA chain terminates at Root YR cross-signed by ISRG ROOT X1, which
+	# Android has trusted since 7.1.1. Desktop curl accepts both because
+	# desktop CA bundles are newer, so this failure would have shown up only
+	# on the phone, as an opaque TLS error.
+	tls {
+		key_type rsa2048
+	}
+
 	encode zstd gzip
 
 	# Video previews are large; the phone streams them from /jobs/*/file/*.
