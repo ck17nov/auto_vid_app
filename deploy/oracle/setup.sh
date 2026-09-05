@@ -72,16 +72,55 @@ say "Opening the host firewall"
 # REJECT everything except SSH, on top of the cloud Security List. Opening
 # ingress in the console alone is not enough and gives you a silent timeout
 # with no log line anywhere. Both layers must be opened.
-iptables -C INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null \
-  || iptables -I INPUT 6 -p tcp --dport 80 -j ACCEPT
-iptables -C INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null \
-  || iptables -I INPUT 6 -p tcp --dport 443 -j ACCEPT
+#
+# POSITION MATTERS, and getting it wrong is silent. This used `-I INPUT 6`,
+# which on a real Oracle Ubuntu 24.04 image put the rules at 6 and 7 - AFTER
+# the catch-all REJECT at position 5:
+#
+#   4  ACCEPT  tcp dpt:22
+#   5  REJECT  reject-with icmp-host-prohibited
+#   6  ACCEPT  tcp dpt:443      <- never evaluated
+#   7  ACCEPT  tcp dpt:80       <- never evaluated
+#
+# iptables matches top-down and stops at the first match, so both rules were
+# dead. `iptables -C` then reported them as present on every re-run, so the
+# script looked idempotent and correct while the ports stayed shut. Let's
+# Encrypt failed with "Error getting validation data" and everything pointed
+# at the cloud Security List, which was fine.
+#
+# The REJECT's position is found rather than assumed - it differs between
+# images, and there may be no REJECT at all on a permissive one.
+reject_line() {
+  iptables -L INPUT -n --line-numbers | awk '/REJECT|DROP/{print $1; exit}'
+}
+for port in 80 443; do
+  # Drop any existing rule first: one sitting after the REJECT is worse than
+  # none, because -C reports success and hides the problem.
+  while iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null; do
+    iptables -D INPUT -p tcp --dport "$port" -j ACCEPT
+  done
+  at="$(reject_line)"
+  if [[ -n "$at" ]]; then
+    iptables -I INPUT "$at" -p tcp --dport "$port" -j ACCEPT
+  else
+    iptables -A INPUT -p tcp --dport "$port" -j ACCEPT
+  fi
+done
 if command -v netfilter-persistent >/dev/null 2>&1; then
   netfilter-persistent save >/dev/null
   echo "iptables rules saved (survive reboot)"
 else
   warn "netfilter-persistent missing; rules will NOT survive a reboot"
 fi
+# Prove it, rather than trusting that the insert landed usefully.
+for port in 80 443; do
+  before_reject="$(iptables -L INPUT -n --line-numbers \
+    | awk -v p="dpt:$port" '$0 ~ p {print $1; exit}')"
+  at="$(reject_line)"
+  if [[ -n "$at" && -n "$before_reject" && "$before_reject" -gt "$at" ]]; then
+    warn "port $port ACCEPT is at $before_reject, AFTER the REJECT at $at - it will not work"
+  fi
+done
 
 # --------------------------------------------------------------------------
 say "Creating the service account"

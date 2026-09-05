@@ -102,6 +102,21 @@ Port 80 is not optional — Let's Encrypt's HTTP challenge uses it.
 that reject everything except SSH. `setup.sh` fixes this for you and persists
 it, so you do not need to do it by hand.
 
+If HTTPS still times out after both layers look right, check the ORDER of the
+iptables rules - not just that they exist:
+
+```bash
+sudo iptables -L INPUT -n --line-numbers
+```
+
+The ACCEPT rules for 80 and 443 must appear **above** the catch-all
+`REJECT ... icmp-host-prohibited`. iptables matches top-down and stops at the
+first match, so a rule below the REJECT is never evaluated. `iptables -C`
+reports it as present either way, which is exactly how this hides: everything
+looks configured and the port stays shut. Let's Encrypt then fails with
+`Error getting validation data` and all the evidence points at the cloud
+Security List, which is fine.
+
 ## Step 4 — A hostname, so you get real HTTPS
 
 You need a DNS name for a certificate. Free option: **DuckDNS**.
@@ -119,7 +134,10 @@ for LAN development.
 
 ## Step 5 — Give the server read access to the repo
 
-**The repository is private**, so the instance cannot clone it anonymously.
+**Skip this entirely if your repo is public** - an anonymous HTTPS clone just
+works, and `setup.sh --repo https://github.com/<you>/<repo>.git` needs no key.
+
+If the repository is PRIVATE, the instance cannot clone it anonymously.
 A read-only deploy key is the tidiest answer — scoped to this one repo, no
 write access, and nothing secret ends up inside the git remote on disk.
 
