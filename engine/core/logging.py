@@ -51,7 +51,21 @@ def setup_logging(level: str = "INFO", jsonl: Path | None = None) -> None:
     _JSONL_PATH = jsonl
     if _HANDLER_READY:
         return
-    h = logging.StreamHandler(sys.stdout)
+    # Force UTF-8 on the log stream.
+    #
+    # Real YouTube titles, LLM output and stock-photo credits are full of
+    # non-ASCII - curly quotes, emoji, accented names. On a cp1252 Windows
+    # console, logging one raises UnicodeEncodeError INSIDE the handler, and
+    # Python prints a "--- Logging error ---" traceback to stderr while
+    # dropping the line. It is not fatal, but it is noise that hides real
+    # errors, and a log that cannot print its own content is not much of a log.
+    # errors="replace" is deliberate: a mangled character beats a lost line.
+    stream = sys.stdout
+    try:
+        stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+    except (AttributeError, ValueError, OSError):
+        pass
+    h = logging.StreamHandler(stream)
     h.setFormatter(_Fmt())
     root = logging.getLogger("autotube")
     root.handlers.clear()
