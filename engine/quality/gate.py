@@ -34,6 +34,14 @@ CHECKS: list[Check] = [
     Check("resolution", 6.0, blocking=True),
     Check("aspect_ratio", 5.0),
     Check("frame_rate", 3.0),
+    # Picture integrity. The gate measured resolution, codec, duration and
+    # audio and never once looked at whether there was an image. Every stage
+    # can report success while the output is black or frozen - a provider
+    # handing back an empty frame, a zoompan landing off the source, a stalled
+    # decode. Blocking, because a black video is not a video.
+    Check("no_black_frames", 7.0, blocking=True),
+    Check("no_frozen_video", 5.0),
+    Check("no_clipping", 4.0),
     Check("audio_present", 8.0, blocking=True),
     Check("audio_not_silent", 8.0, blocking=True),
     Check("audio_loudness", 5.0),
@@ -199,6 +207,16 @@ class QualityGate:
                            f"{lufs:.2f} LUFS (target {target_lufs:.1f})",
                            partial=max(0.0, 1.0 - off / 4.0))
 
+                peak = self._peak_dbfs(video)  # type: ignore[arg-type]
+                if peak is None:
+                    record("no_clipping", False, "peak level not measurable")
+                else:
+                    over = peak - self.PEAK_CEILING_DBFS
+                    record("no_clipping", peak < self.PEAK_CEILING_DBFS,
+                           f"peak {peak:.2f} dBFS "
+                           f"(ceiling {self.PEAK_CEILING_DBFS:.1f})",
+                           partial=max(0.0, 1.0 - over / 6.0))
+
                 silences = self._silences(video)  # type: ignore[arg-type]
                 longest = max((d for _, d in silences), default=0.0)
                 record("no_long_silence", longest <= self.max_silence,
@@ -209,8 +227,26 @@ class QualityGate:
                 record("audio_not_silent", False, "no audio stream")
                 record("audio_loudness", False, "no audio stream")
                 record("no_long_silence", False, "no audio stream")
+                record("no_clipping", False, "no audio stream")
+
+            # ---- picture integrity ---------------------------------------
+            blacks = self._black_spans(video)  # type: ignore[arg-type]
+            black_total = sum(d for _, d in blacks)
+            record("no_black_frames", not blacks,
+                   (f"{len(blacks)} black span(s), {black_total:.2f}s total"
+                    if blacks else "none"),
+                   partial=max(0.0, 1.0 - black_total / 3.0))
+
+            freezes = self._freeze_spans(
+                video, duration)  # type: ignore[arg-type]
+            freeze_total = sum(d for _, d in freezes)
+            record("no_frozen_video", not freezes,
+                   (f"{len(freezes)} frozen span(s), {freeze_total:.2f}s total"
+                    if freezes else "none"),
+                   partial=max(0.0, 1.0 - freeze_total / 5.0))
         else:
             for name in ("playable", "resolution", "aspect_ratio", "frame_rate",
+                         "no_black_frames", "no_frozen_video", "no_clipping",
                          "encoding_compatible", "file_size", "duration_correct",
                          "audio_present", "audio_not_silent", "audio_loudness",
                          "no_long_silence"):
@@ -357,6 +393,114 @@ class QualityGate:
         except CommandError:
             pass
         return out
+
+    def _black_spans(self, media: Path) -> list[tuple[float, float]]:
+        """Detect black segments. Returns [(start, duration)].
+
+        The gate measured resolution, codec, duration and audio and never
+        looked at whether the picture was actually there. Everything upstream
+        can report success while the video is black: a visual provider handing
+        back a near-empty frame, a zoompan expression that lands off the source,
+        a stalled decode of a stock clip. This project has already produced
+        near-black procedural frames once, so the failure mode is not
+        hypothetical.
+
+        `pix_th=0.10` is the per-pixel blackness threshold and `pic_th=0.98`
+        the share of the frame that must be black, which is deliberately strict
+        - a legitimately dark shot (night sky, deep sea) should not be flagged.
+        """
+        try:
+            proc = run([ffmpeg_bin(), "-hide_banner", "-nostats", "-i", str(media),
+                        "-vf", "blackdetect=d=0.5:pix_th=0.10:pic_th=0.98",
+                        "-f", "null", "-"], timeout=900, check=False)
+        except CommandError:
+            return []
+        out: list[tuple[float, float]] = []
+        for m in re.finditer(
+                r"black_start:\s*([\d.]+)\s+black_end:\s*([\d.]+)\s+"
+                r"black_duration:\s*([\d.]+)", proc.stderr or ""):
+            out.append((float(m.group(1)), float(m.group(3))))
+        return out
+
+    def _freeze_spans(self, media: Path,
+                      total_duration: float = 0.0) -> list[tuple[float, float]]:
+        """Detect frozen video. Returns [(start, duration)].
+
+        A stalled encode, or a stock clip that decodes to one repeated frame,
+        looks identical to a working video by every other measure. Note this is
+        NOT the same as a still with Ken Burns applied - that moves every frame.
+
+        `freeze_start` and `freeze_duration` are parsed SEPARATELY and paired
+        up afterwards, which matters more than it looks. When a freeze runs to
+        the end of the file the span never closes, so ffmpeg emits
+        `freeze_start` with no `freeze_duration` at all. A regex requiring both
+        found nothing and reported a completely frozen video as clean - the
+        precise case the check exists for. An unclosed span is therefore
+        treated as running to the end.
+        """
+        try:
+            proc = run([ffmpeg_bin(), "-hide_banner", "-nostats", "-i", str(media),
+                        "-vf", "freezedetect=n=-60dB:d=2.5",
+                        "-f", "null", "-"], timeout=900, check=False)
+        except CommandError:
+            return []
+        text = proc.stderr or ""
+        starts = [float(m.group(1)) for m in
+                  re.finditer(r"freeze_start:\s*([\d.]+)", text)]
+        durations = [float(m.group(1)) for m in
+                     re.finditer(r"freeze_duration:\s*([\d.]+)", text)]
+        if not starts:
+            return []
+        if total_duration <= 0:
+            total_duration = self._duration(media)
+
+        out: list[tuple[float, float]] = []
+        for i, start in enumerate(starts):
+            if i < len(durations):
+                out.append((start, durations[i]))
+            elif total_duration > start:
+                out.append((start, total_duration - start))
+            else:
+                # Unknown length; report it rather than dropping it silently.
+                out.append((start, 0.0))
+        return out
+
+    @staticmethod
+    def _duration(media: Path) -> float:
+        fmt = (probe_json(media).get("format") or {})
+        try:
+            return float(fmt.get("duration") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    # Anything at or above this is hitting full scale. The master targets
+    # -1.5 dBTP, so a healthy file sits well below.
+    PEAK_CEILING_DBFS = -0.1
+
+    def _peak_dbfs(self, media: Path) -> float | None:
+        """Highest peak level in dBFS, or None if it cannot be measured.
+
+        Measures PEAK rather than a clipped-sample count. The first version
+        parsed astats' "Number of clipped samples", which ffmpeg 9.0 does not
+        emit at all - so it always found zero and the check could never fail.
+        A check that cannot fail is worse than no check: it silently added its
+        full weight to every score. Verified against deliberately overloaded
+        audio, where the field was absent and `Peak level dB` read +21.9.
+
+        The master chain ends in a limiter, so a peak above full scale should
+        be impossible - which is precisely why it is worth measuring rather
+        than assuming. A filter-graph mistake that bypasses the limiter would
+        otherwise ship distorted audio that every other level check passes.
+        """
+        try:
+            proc = run([ffmpeg_bin(), "-hide_banner", "-nostats", "-i", str(media),
+                        "-af", "astats=metadata=1:reset=0",
+                        "-f", "null", "-"], timeout=900, check=False)
+        except CommandError:
+            return None
+        peaks = [float(m.group(1)) for m in
+                 re.finditer(r"Peak level dB:\s*(-?[\d.]+)", proc.stderr or "")]
+        return max(peaks) if peaks else None
 
     def _silences(self, media: Path) -> list[tuple[float, float]]:
         """Detect silent gaps. Returns [(start, duration)]."""

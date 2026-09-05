@@ -1655,3 +1655,156 @@ class TestKidsAnimation:
         assert engine.kids_provider is not None
         assert all(p.name != "kids_animation" for p in engine.providers), \
             "it must be selected per request, not sit in the default chain"
+
+
+# ==========================================================================
+# Picture integrity
+# ==========================================================================
+class TestPictureIntegrity:
+    """The gate measured resolution, codec, duration and audio, and never
+    looked at whether there was an image.
+
+    Every stage can report success while the output is black or frozen: a
+    provider handing back an empty frame, a zoompan expression landing off the
+    source, a stalled decode of a stock clip. This project has already produced
+    near-black procedural frames once, so it is not hypothetical. Adopted from
+    OpenMontage, which validates frames post-render rather than trusting the
+    pipeline.
+    """
+
+    def _make(self, path: Path, vf: str, seconds: float = 3.0) -> Path:
+        subprocess.run(
+            [ffmpeg_bin(), "-y", "-loglevel", "error",
+             "-f", "lavfi", "-i", f"{vf}:d={seconds}",
+             "-f", "lavfi", "-i", f"anullsrc=r=48000:cl=stereo:d={seconds}",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+             "-shortest", str(path)], check=True, timeout=240)
+        return path
+
+    @pytest.fixture(scope="class")
+    def gate(self):
+        from engine.quality.gate import QualityGate
+        return QualityGate(load_config())
+
+    @pytest.mark.slow
+    def test_a_black_video_is_detected(self, gate, tmp_path):
+        v = self._make(tmp_path / "black.mp4", "color=c=black:s=320x568")
+        spans = gate._black_spans(v)
+        assert spans, "a fully black video was not detected"
+        assert sum(d for _, d in spans) > 2.0
+
+    @pytest.mark.slow
+    def test_a_frozen_video_is_detected(self, gate, tmp_path):
+        """A single still held for the whole clip - a stalled encode.
+
+        This is the case the first implementation missed entirely. ffmpeg emits
+        `freeze_start` with NO `freeze_duration` when the freeze runs to the end
+        of the file, because the span never closes. A regex requiring both
+        matched nothing and reported a fully frozen video as clean.
+        """
+        v = self._make(tmp_path / "frozen.mp4", "color=c=red:s=320x568", seconds=6.0)
+        spans = gate._freeze_spans(v)
+        assert spans, "a frozen video was not detected"
+        start, duration = spans[0]
+        assert start == pytest.approx(0.0, abs=0.5)
+        assert duration > 2.0, (
+            f"unclosed freeze span reported {duration}s - it should run to the "
+            f"end of the file")
+
+    @pytest.mark.slow
+    def test_an_unclosed_freeze_span_is_not_dropped(self, gate, tmp_path):
+        """Pins the regression directly: no freeze_duration in the output."""
+        v = self._make(tmp_path / "frozen2.mp4", "color=c=green:s=320x568",
+                       seconds=6.0)
+        raw = subprocess.run(
+            [ffmpeg_bin(), "-hide_banner", "-nostats", "-i", str(v),
+             "-vf", "freezedetect=n=-60dB:d=2.5", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=300).stderr
+        assert "freeze_start" in raw
+        assert "freeze_duration" not in raw, (
+            "ffmpeg now closes the span; the fallback is still correct but "
+            "this test no longer exercises it")
+        assert gate._freeze_spans(v), "the unclosed span was dropped"
+
+    @pytest.mark.slow
+    def test_moving_video_is_not_flagged_as_frozen(self, gate, tmp_path):
+        v = self._make(tmp_path / "moving.mp4", "testsrc=s=320x568:rate=30",
+                       seconds=6.0)
+        assert not gate._freeze_spans(v), "moving video was called frozen"
+
+    @pytest.mark.slow
+    def test_a_legitimately_dark_shot_is_not_flagged(self, gate, tmp_path):
+        """Night skies and deep-sea footage are dark but not black.
+
+        This is why pic_th is 0.98 and pix_th 0.10 rather than something
+        looser - a false positive here would block real videos, and the check
+        is blocking.
+        """
+        # A flat 0x101820 frame really IS black for practical purposes (luma
+        # ~8%), and the first version of this test asserted otherwise. Real
+        # dark footage has highlights, so that is what gets tested: a dark
+        # background with a visible bright element, like a night sky or the
+        # deep-sea clips this pipeline actually produces.
+        v = tmp_path / "dark.mp4"
+        subprocess.run(
+            [ffmpeg_bin(), "-y", "-loglevel", "error",
+             "-f", "lavfi", "-i", "color=c=0x0A0E14:s=320x568:d=3",
+             "-f", "lavfi", "-i", "color=c=0xDDE6FF:s=90x90:d=3",
+             "-filter_complex", "[0:v][1:v]overlay=x=110:y=200[v]",
+             "-map", "[v]", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(v)],
+            check=True, timeout=240)
+        assert not gate._black_spans(v), "a dark-but-visible shot was flagged"
+
+    @pytest.mark.slow
+    def test_a_healthy_master_is_below_the_peak_ceiling(self, gate):
+        """A real delivered video must pass the check it is subjected to."""
+        real = Path("workspace/jobs/20260901-023216_ocean-trenches_40cd6b/video.mp4")
+        if not real.exists():
+            pytest.skip("no rendered video available")
+        peak = gate._peak_dbfs(real)
+        assert peak is not None and peak < gate.PEAK_CEILING_DBFS, peak
+
+    @pytest.mark.slow
+    def test_clipping_is_measured(self, gate, tmp_path):
+        """Measures PEAK, not a clipped-sample count.
+
+        The first version parsed astats' "Number of clipped samples", which
+        ffmpeg 9.0 does not emit - so it always found zero and the check could
+        never fail, silently adding its full weight to every score.
+        """
+        v = tmp_path / "loud.mp4"
+        subprocess.run(
+            [ffmpeg_bin(), "-y", "-loglevel", "error",
+             "-f", "lavfi", "-i", "color=c=blue:s=320x240:d=2",
+             "-f", "lavfi", "-i", "sine=frequency=440:d=2",
+             "-af", "volume=40dB", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+             # NOT pcm_s16le: it is not a valid codec in an MP4 container, and
+             # that is why the first version of this test failed.
+             "-c:a", "aac", "-shortest", str(v)], check=True, timeout=240)
+        peak = gate._peak_dbfs(v)
+        assert peak is not None, "peak level was not measurable"
+        assert peak >= gate.PEAK_CEILING_DBFS, (
+            f"deliberately overloaded audio measured {peak:.2f} dBFS")
+
+    def test_the_checks_are_registered_and_black_frames_block(self):
+        from engine.quality.gate import CHECKS
+        names = {c.name for c in CHECKS}
+        assert {"no_black_frames", "no_frozen_video", "no_clipping"} <= names
+        black = next(c for c in CHECKS if c.name == "no_black_frames")
+        assert black.blocking is True, "a black video is not a video"
+
+    def test_an_unusable_file_records_the_picture_checks_as_failed(self, cfg,
+                                                                   tmp_path):
+        """They must not silently go missing when the video is broken - a
+        missing check would leave the score computed over fewer weights."""
+        from engine.core.models import Script, VideoMetadata
+        from engine.quality.gate import QualityGate
+        report = QualityGate(load_config()).evaluate(
+            video=tmp_path / "does-not-exist.mp4",
+            metadata=VideoMetadata(title="T", description="D", tags=["a"]),
+            script=Script(script="x", scenes=[]),
+            profile=build_profile("science"))
+        by_name = {c["name"]: c for c in report.checks}
+        for name in ("no_black_frames", "no_frozen_video", "no_clipping"):
+            assert name in by_name, f"{name} missing from the report"
+            assert by_name[name]["passed"] is False
