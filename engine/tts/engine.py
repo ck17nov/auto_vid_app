@@ -35,6 +35,20 @@ class VoiceEngine:
             style=style,
         )
 
+    def can_change_rate(self, provider_names: set[str]) -> bool:
+        """True only if EVERY provider that voiced a scene supports a rate change.
+
+        The duration re-fit re-synthesises at a corrected speaking rate. gTTS
+        has no rate parameter and Piper as invoked here has none either, so for
+        those the re-fit is a silent no-op - it costs a full re-synthesis and
+        returns an identical recording. All-or-nothing because a mixed result
+        would leave part of the video corrected and part not, which is worse
+        than leaving it alone and letting the duration check report it.
+        """
+        capable = {p.name for p in self.providers
+                   if getattr(p, "supports_rate", False)}
+        return bool(provider_names) and provider_names.issubset(capable)
+
     def synthesize_scenes(self, scenes: list[Scene], out_dir: Path,
                           spec: VoiceSpec) -> list[SceneAudio]:
         """One clip per scene. Falls back down the provider chain per scene."""

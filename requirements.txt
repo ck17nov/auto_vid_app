@@ -13,7 +13,13 @@ typer==0.15.1
 rich==13.9.4
 python-dotenv==1.0.1
 # --- TTS (free, no key) ---
-edge-tts==7.0.0
+# 7.0.0 is NOT usable: it predates the `boundary` argument, so the word-timing
+# call raises TypeError and the whole provider falls through to gTTS - which
+# has no word boundaries and no rate control, silently costing frame-accurate
+# captions AND the duration re-fit. 7.0.0 was also the version that started
+# returning HTTP 403. This pin was stale for months; the dev laptop only
+# worked because it had been upgraded by hand.
+edge-tts==7.2.8
 gTTS==2.5.4
 # --- YouTube (official APIs) ---
 google-api-python-client==2.159.0

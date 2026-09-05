@@ -416,7 +416,25 @@ class Pipeline:
             trigger = float(self.cfg.get("quality.longform_refit_pct", 7)) / 100.0
         # Never let the trigger exceed what the gate would fail anyway.
         trigger = min(trigger, tolerance * 0.8)
-        if abs(drift) > trigger:
+
+        # Re-fitting works by changing the SPEAKING RATE, so it only helps if
+        # the provider that actually voiced the scenes can honour one. gTTS
+        # cannot - it has no rate parameter - and Piper as invoked here cannot
+        # either. Re-synthesising with those is pure cost for an identical
+        # result: on a fresh install where edge-tts had failed and gTTS took
+        # over, the pipeline "corrected" a 63.3s recording by +16% and got
+        # 63.3s back, then shipped a 41% duration miss. Say so instead.
+        used = {c.provider for _, c in offsets} or {"unknown"}
+        rate_capable = self.voice_engine.can_change_rate(used)
+        if abs(drift) > trigger and not rate_capable:
+            log_event("TTS", "duration is off but the voice cannot be re-fitted",
+                      providers=",".join(sorted(used)),
+                      measured=f"{total:.1f}s", target=f"{target:.0f}s",
+                      drift=f"{drift * 100:+.0f}%",
+                      note="only edge-tts supports a rate change; the quality "
+                           "gate will block this on duration")
+
+        if abs(drift) > trigger and rate_capable:
             # Correct the speaking rate rather than shipping a mistimed video.
             # edge-tts rate is a percentage delta on the base speed.
             base = _parse_rate(spec.rate)

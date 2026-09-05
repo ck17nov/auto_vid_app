@@ -1808,3 +1808,66 @@ class TestPictureIntegrity:
         for name in ("no_black_frames", "no_frozen_video", "no_clipping"):
             assert name in by_name, f"{name} missing from the report"
             assert by_name[name]["passed"] is False
+
+
+# ==========================================================================
+# The edge-tts version trap
+# ==========================================================================
+class TestVoiceProviderCapabilities:
+    """A stale pin in requirements.txt broke every fresh install.
+
+    requirements.txt said edge-tts==7.0.0, which predates the `boundary`
+    argument. Passing it raised TypeError, edge-tts failed on every scene, and
+    the chain fell through to gTTS - which has neither word boundaries nor
+    rate control. So captions became estimates AND the duration re-fit turned
+    into a silent no-op: the pipeline "corrected" a 63.3s recording by +16%
+    and got 63.3s back, shipping a 41% duration miss. The dev laptop worked
+    only because it had been upgraded by hand months earlier.
+    """
+
+    def test_the_pinned_edge_tts_accepts_boundary(self):
+        """The pin and the code must agree. This is the whole bug."""
+        import inspect
+        import edge_tts
+        assert "boundary" in inspect.signature(
+            edge_tts.Communicate.__init__).parameters, (
+            "installed edge-tts predates `boundary`; word timings are "
+            "impossible and the provider will fail outright")
+
+    def test_requirements_does_not_pin_a_version_without_boundary(self):
+        text = Path("requirements.txt").read_text(encoding="utf-8")
+        line = next(l for l in text.splitlines()
+                    if l.strip().lower().startswith("edge-tts"))
+        assert "7.0.0" not in line, (
+            "7.0.0 has no `boundary` argument and also returned HTTP 403")
+
+    def test_providers_declare_whether_they_can_change_rate(self):
+        from engine.tts.providers import (EdgeTTSProvider, GTTSProvider,
+                                          PiperTTSProvider)
+        assert EdgeTTSProvider.supports_rate is True
+        assert GTTSProvider.supports_rate is False, "gTTS has no rate parameter"
+        assert PiperTTSProvider.supports_rate is False
+
+    @pytest.mark.parametrize("used,expected", [
+        ({"edge"}, True),
+        ({"gtts"}, False),
+        ({"piper"}, False),
+        ({"edge", "gtts"}, False),      # mixed: correcting half is worse
+        (set(), False),
+    ])
+    def test_rate_capability_is_all_or_nothing(self, cfg, used, expected):
+        from engine.tts.engine import VoiceEngine
+        assert VoiceEngine(load_config()).can_change_rate(used) is expected
+
+    def test_an_old_edge_tts_degrades_instead_of_failing(self, cfg, monkeypatch):
+        """Without `boundary` edge-tts still works, just with estimated
+        timings - and that is far better than collapsing to gTTS, which loses
+        rate control as well."""
+        import inspect
+        from engine.tts import providers as mod
+        src = inspect.getsource(mod.EdgeTTSProvider.synthesize)
+        code = "\n".join(l for l in src.splitlines()
+                         if not l.lstrip().startswith("#"))
+        assert "supports_boundary" in code, \
+            "the boundary argument must be conditional on the installed version"
+        assert 'extra = {"boundary": "WordBoundary"} if supports_boundary else {}' in code

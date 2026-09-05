@@ -68,6 +68,8 @@ def resolve_voice(spec: VoiceSpec) -> str:
 # --------------------------------------------------------------------------
 class EdgeTTSProvider:
     name = "edge"
+    # Accepts a rate delta, so the duration re-fit works.
+    supports_rate = True
 
     def __init__(self, timeout: int = 90):
         self.timeout = timeout
@@ -87,12 +89,25 @@ class EdgeTTSProvider:
         mp3_path = out_path.with_suffix(".mp3")
         mp3_path.parent.mkdir(parents=True, exist_ok=True)
 
+        # `boundary` does not exist before edge-tts 7.1. Passing it to an older
+        # version raises TypeError, the provider fails outright, and the chain
+        # collapses to gTTS - which has neither word boundaries nor rate
+        # control, so captions become estimates and the duration re-fit turns
+        # into a no-op. That happened on a fresh install pinned to 7.0.0 and
+        # produced a 63s video for a 45s request. requirements.txt is pinned
+        # correctly now; this keeps a mismatched environment degraded rather
+        # than broken, because edge-tts without exact timings still beats gTTS.
+        import inspect
+        supports_boundary = "boundary" in inspect.signature(
+            edge_tts.Communicate.__init__).parameters
+
         async def _run() -> tuple[bytes, list[WordMark]]:
             # boundary="WordBoundary" is required: the default is SentenceBoundary
             # and yields no per-word timings.
+            extra = {"boundary": "WordBoundary"} if supports_boundary else {}
             comm = edge_tts.Communicate(
                 text, voice, rate=rate, pitch=spec.pitch or "+0Hz",
-                boundary="WordBoundary", receive_timeout=self.timeout)
+                receive_timeout=self.timeout, **extra)
             audio = bytearray()
             marks: list[WordMark] = []
             async for chunk in comm.stream():
@@ -106,6 +121,11 @@ class EdgeTTSProvider:
                         text=chunk["text"]))
             return bytes(audio), marks
 
+        if not supports_boundary:
+            log_event("TTS", "edge-tts is too old for word boundaries",
+                      installed=getattr(edge_tts, "__version__", "?"),
+                      effect="captions will be estimated, not frame-accurate",
+                      fix="pip install -U edge-tts")
         audio_bytes, marks = _run_async(_run())
         if len(audio_bytes) < 800:
             raise RuntimeError(f"edge-tts returned {len(audio_bytes)} bytes of audio")
@@ -144,6 +164,8 @@ class PiperTTSProvider:
     downloaded into assets/piper/. See docs/API_SETUP.md.
     """
     name = "piper"
+    # No rate control in the CLI we invoke.
+    supports_rate = False
 
     def __init__(self, model_dir: Path | None = None):
         self.model_dir = Path(model_dir or Path(__file__).resolve().parents[2] / "assets" / "piper")
@@ -206,6 +228,10 @@ class PiperTTSProvider:
 # --------------------------------------------------------------------------
 class GTTSProvider:
     name = "gtts"
+    # gTTS has no rate parameter at all. Re-fitting duration by
+    # changing the speaking rate is a silent no-op here, which is
+    # how a 45s request shipped as 63s.
+    supports_rate = False
     _LANG = {"en": "en", "en-IN": "en", "hi": "hi", "ta": "ta", "te": "te",
              "bn": "bn", "mr": "mr", "es": "es", "fr": "fr", "de": "de",
              "pt": "pt", "ar": "ar", "id": "id", "ja": "ja"}
