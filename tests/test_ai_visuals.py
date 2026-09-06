@@ -229,11 +229,39 @@ class TestBackendSelection:
     def test_the_keyless_backend_needs_no_credentials(self):
         assert PollinationsBackend().available() is True
 
-    def test_the_hf_backend_disables_response_caching(self):
-        """A warm cache returns the same picture and defeats the seed."""
+    def test_the_hf_backend_does_not_use_the_dead_endpoint(self):
+        """api-inference.huggingface.co no longer resolves in DNS.
+
+        The first version of the backend posted to it, so it could never have
+        worked. Serving moved to Inference Providers behind
+        router.huggingface.co, which huggingface_hub routes for us.
+        """
         import inspect
-        src = inspect.getsource(HuggingFaceBackend.fetch)
-        assert '"use_cache": False' in src
+        # The docstring explains the dead endpoint, so compare against CODE.
+        src = inspect.getsource(HuggingFaceBackend)
+        code = src.replace(HuggingFaceBackend.__doc__ or "", "")
+        assert "api-inference.huggingface.co" not in code
+        assert "InferenceClient" in code
+
+    def test_credit_exhaustion_is_its_own_error(self):
+        """A 402 must not be retried three times per scene."""
+        from engine.visuals.ai_image import CreditExhausted
+        assert issubclass(CreditExhausted, RuntimeError)
+
+    def test_a_402_degrades_to_keyless_instead_of_killing_the_job(self, tmp_path):
+        """Otherwise one 402 turns the rest of an illustrated video to shapes."""
+        from engine.visuals.ai_image import CreditExhausted
+        paid = FakeBackend([CreditExhausted("402")])
+        free = FakeBackend([_png_bytes((4, 8, 16))])
+        free.id = "keyless"
+        p = AIImageProvider(paid, retry_backoff=0, fallback=free)
+
+        asset = p.fetch(_req(0), tmp_path / "a.jpg")
+
+        # The scene still produced a drawn image, from the free backend.
+        assert p.backend is free
+        assert asset.source == "generated:keyless"
+        assert len(free.calls) == 1
 
 
 # ==========================================================================

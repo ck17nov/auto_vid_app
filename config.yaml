@@ -135,10 +135,17 @@ visuals:
   #   pollinations  - keyless, free, no account. Painterly house style; it
   #                   will NOT produce flat-colour anime line art, whatever
   #                   the prompt says. This is the zero-cost default.
-  #   huggingface   - free account + HF_API_TOKEN. Runs any text-to-image repo
-  #                   on the Inference API, so an anime-tuned checkpoint named
-  #                   in ai_image_model actually draws in that style. This is
-  #                   the path to a Ghibli-style channel look.
+  #   huggingface   - needs HF_API_TOKEN. Verified to produce exactly the
+  #                   look this was built for: FLUX.1-schnell returns clean
+  #                   cel-shaded artwork, bold outlines, coherent faces, in
+  #                   3-12 seconds.
+  #
+  #                   NOT free at volume. Measured on a free account: SEVEN
+  #                   images, then HTTP 402. A 30-minute video needs about
+  #                   three hundred. Running a channel on this means HF PRO or
+  #                   pay-as-you-go credit - so it is off by default, and a
+  #                   402 mid-job degrades to keyless rather than wrecking the
+  #                   render.
   ai_image_backend: pollinations
   # Used by the huggingface backend. Ignored by pollinations.
   ai_image_model: black-forest-labs/FLUX.1-schnell

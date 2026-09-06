@@ -39,9 +39,14 @@ Three things here were learned by getting them wrong first:
    phrasing tested here got clean cel-shaded anime line art out of it - three
    prompt shapes on a fixed seed all returned the same soft painted look. That
    is a large improvement on stock photography for illustrated storytelling and
-   it is NOT the flat-colour anime of a Ghibli-style channel. Getting that look
-   needs a model that can draw it, so the HTTP call sits behind a small backend
-   interface and `visuals.ai_image_backend` selects one.
+   it is NOT the flat-colour anime of a Ghibli-style channel.
+
+   Confirmed by swapping the backend: the same prompt through FLUX.1-schnell
+   returns clean cel-shaded artwork with bold outlines and coherent faces. The
+   prompt was never the problem. So the HTTP call sits behind a small backend
+   interface that `visuals.ai_image_backend` selects - and the better one is
+   metered, seven images on a free account before a 402, against the ~300 a
+   half-hour video needs.
 
 Licensing: images are generated from our own prompts. No third-party rights are
 claimed and nothing is taken from another creator (spec section 13).
@@ -129,52 +134,84 @@ class PollinationsBackend:
             return resp.content
 
 
+class CreditExhausted(RuntimeError):
+    """The paid quota is gone. Retrying costs time and changes nothing."""
+
+
 class HuggingFaceBackend:
-    """Free tier, needs a token, and can run a model that draws what you ask.
+    """Runs a model that actually draws what you ask for.
 
-    This is the path to the flat-colour anime look the keyless endpoint will
-    not produce. Any text-to-image repo on the Inference API works, so an
-    anime-tuned checkpoint can be named in config without touching code.
+    This is the path to the flat-colour illustration the keyless endpoint will
+    not produce. Verified: FLUX.1-schnell returns clean cel-shaded artwork with
+    bold outlines and coherent faces, in 3 to 12 seconds - the class of image an
+    illustrated story channel is made of.
 
-    Costs: a free account and an access token in HF_API_TOKEN. Rate limited per
-    hour rather than per day, and a cold model answers 503 with an
-    `estimated_time` while it loads - which is transient, not a failure, so it
-    is raised as such and the caller's retry handles it.
+    Two hard-won details about the API:
+
+      * `api-inference.huggingface.co` NO LONGER EXISTS. It does not even
+        resolve in DNS. The first version of this class posted to it and would
+        never have worked. Serving moved to Inference Providers, routed through
+        router.huggingface.co, and the model is dispatched to a third party
+        (nscale, fal-ai, replicate, wavespeed). Each provider has its own
+        request and response shape, which is why this delegates routing to
+        huggingface_hub rather than reimplementing it.
+
+      * IT IS NOT FREE AT VOLUME. A free account gets a small monthly credit
+        for Inference Providers - measured here as seven images before a 402,
+        against the ~300 a thirty-minute video needs. So 402 is raised as
+        CreditExhausted, which the provider treats as terminal for the whole
+        job instead of retrying it three times per scene.
+
+    huggingface_hub is imported lazily so a deployment without it degrades to
+    keyless generation rather than failing to start.
     """
 
     id = "huggingface"
-    label = "Hugging Face Inference API"
-    ENDPOINT = "https://api-inference.huggingface.co/models/"
+    label = "Hugging Face Inference Providers"
 
     def __init__(self, model: str, token: str, timeout: int = 180):
         self.model = model
         self.token = token
         self.timeout = timeout
+        self._client = None
 
     def available(self) -> bool:
-        return bool(self.token and self.model)
+        if not (self.token and self.model):
+            return False
+        try:
+            import huggingface_hub                       # noqa: F401
+        except ImportError:
+            log_event("VISUAL", "huggingface_hub not installed",
+                      hint="pip install huggingface_hub")
+            return False
+        return True
+
+    def _client_or_build(self):
+        if self._client is None:
+            from huggingface_hub import InferenceClient
+            # provider="auto" picks whichever third party is currently serving
+            # the model. Pinning one would break the day it goes offline, and
+            # they do: FLUX.1-schnell reports `together` as errored right now.
+            self._client = InferenceClient(api_key=self.token, provider="auto",
+                                           timeout=self.timeout)
+        return self._client
 
     def fetch(self, prompt: str, *, width: int, height: int, seed: int) -> bytes:
-        body = {
-            "inputs": prompt,
-            "parameters": {"width": width, "height": height, "seed": seed},
-            # Without this a warm cache returns the same picture for a repeated
-            # prompt, which defeats the seed and the duplicate check both.
-            "options": {"use_cache": False, "wait_for_model": True},
-        }
-        with httpx.Client(timeout=self.timeout) as client:
-            resp = client.post(
-                self.ENDPOINT + self.model,
-                headers={"Authorization": f"Bearer {self.token}",
-                         "Accept": "image/png", **_UA},
-                json=body)
-            if resp.status_code == 503:
-                raise RuntimeError("huggingface: model loading (503), retry")
-            resp.raise_for_status()
-            if "image" not in resp.headers.get("content-type", ""):
-                raise RuntimeError(
-                    f"huggingface: not an image ({resp.text[:160]})")
-            return resp.content
+        import io
+        try:
+            image = self._client_or_build().text_to_image(
+                prompt, model=self.model, width=width, height=height, seed=seed)
+        except Exception as exc:
+            text = str(exc)
+            if "402" in text or "Payment Required" in text:
+                raise CreditExhausted(
+                    "huggingface: inference credit exhausted (402). Add credit, "
+                    "subscribe to PRO, or set visuals.ai_image_backend back to "
+                    "pollinations.") from exc
+            raise
+        buf = io.BytesIO()
+        image.save(buf, "PNG")
+        return buf.getvalue()
 
 
 def build_backend(cfg) -> object:
@@ -190,8 +227,12 @@ def build_backend(cfg) -> object:
                               "black-forest-labs/FLUX.1-schnell")),
             token=cfg.secret("HF_API_TOKEN"))
         if backend.available():
+            log_event("VISUAL", "using paid image generation",
+                      backend=backend.id, model=backend.model)
             return backend
-        log_event("VISUAL", "HF_API_TOKEN not set, using keyless generation")
+        log_event("VISUAL", "huggingface unavailable, using keyless generation",
+                  reason=("no HF_API_TOKEN" if not cfg.secret("HF_API_TOKEN")
+                          else "huggingface_hub not installed"))
     return PollinationsBackend(
         model=str(cfg.get("visuals.pollinations_model", "sana")))
 
@@ -216,8 +257,13 @@ class AIImageProvider:
     DUPLICATE_DISTANCE = 6
 
     def __init__(self, backend=None, max_attempts: int = 3,
-                 retry_backoff: float = 4.0):
+                 retry_backoff: float = 4.0, fallback=None):
         self.backend = backend or PollinationsBackend()
+        # Where to go when a paid backend runs out of credit. Injectable so it
+        # can be exercised without reaching the network - hard-coding the
+        # constructor meant the only way to test the swap was to make a real
+        # request, which is exactly the kind of test that rots.
+        self.fallback = fallback if fallback is not None else PollinationsBackend()
         self.max_attempts = max_attempts
         self.retry_backoff = retry_backoff
         self._seen: dict[int, int] = {}      # hash -> scene that produced it
@@ -291,6 +337,27 @@ class AIImageProvider:
                 time.sleep(self.retry_backoff * attempt)
             try:
                 self._download(prompt, req, seed, out_path)
+            except CreditExhausted as exc:
+                # Terminal for the paid backend, but NOT for the job.
+                #
+                # Dropping the provider here would send every remaining scene
+                # to `procedural`, because a template that prefers illustration
+                # has stock removed from its chain - so one 402 would turn the
+                # rest of the video into abstract shapes. Falling back to
+                # keyless generation keeps the MEDIUM (a drawn scene) and only
+                # loses fidelity, which is the smaller loss by a wide margin.
+                #
+                # Swapped once, under the lock, so twenty concurrent scenes do
+                # not each rebuild the backend and re-log the warning.
+                with self._lock:
+                    if self.backend is not self.fallback:
+                        log_event("VISUAL", "paid image credit exhausted, "
+                                  "falling back to keyless generation",
+                                  was=self.backend.id,
+                                  now=self.fallback.id, error=str(exc)[:120])
+                        self.backend = self.fallback
+                last_error = exc
+                continue
             except Exception as exc:            # network, HTTP, wrong type
                 last_error = exc
                 continue

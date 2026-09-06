@@ -6,6 +6,14 @@ pydantic-settings==2.7.1
 PyYAML==6.0.2
 tzdata==2025.1            # Windows has no system tz database; required for scheduling
 httpx==0.28.1
+# Optional: only imported when visuals.ai_image_backend=huggingface.
+#
+# Needed because Hugging Face retired api-inference.huggingface.co (it no
+# longer resolves) in favour of Inference Providers, which dispatch a model to
+# a third party - nscale, fal-ai, replicate - each with its own request and
+# response shape. This library does that routing; reimplementing it by hand
+# would be a per-provider maintenance job.
+huggingface_hub==1.30.0
 requests==2.32.3
 Pillow==11.1.0
 numpy==2.2.1
