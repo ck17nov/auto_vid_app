@@ -14,6 +14,11 @@ httpx==0.28.1
 # response shape. This library does that routing; reimplementing it by hand
 # would be a per-provider maintenance job.
 huggingface_hub==1.30.0
+# Installing it upgrades click past gtts's declared `click<8.2` and pip prints
+# a dependency-conflict error. Verified on the deployed box: gtts imports and
+# synthesises Hindi correctly at click 8.5.0, and /health still lists both TTS
+# providers. The constraint is over-conservative - do not "fix" it by pinning
+# click down, which would then fight typer and uvicorn.
 requests==2.32.3
 Pillow==11.1.0
 numpy==2.2.1
