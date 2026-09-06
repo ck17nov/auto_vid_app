@@ -54,6 +54,15 @@ class StyleTemplate:
     saturation: float = 1.07
     visual_style_suffix: str = ""          # appended to every image prompt
     music_mood: str = "cinematic"
+    # Generate the images instead of searching stock libraries.
+    #
+    # A property of the TEMPLATE, not of the deployment, because it has to
+    # agree with visual_style_suffix. Those two contradicting each other is
+    # the failure this prevents: a template asking for illustration while the
+    # pipeline serves photographs produces a slideshow that changes medium
+    # every four seconds, and a template asking for photography while the
+    # pipeline draws produces the soft airbrushed look people call AI slop.
+    prefer_ai: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -100,15 +109,28 @@ TEMPLATES: dict[str, StyleTemplate] = {
     ),
     "STORYTELLING": StyleTemplate(
         name="STORYTELLING",
-        description="Intimate narrative. Slow pushes, moody grade.",
-        scene_seconds=3.8, words_per_second=2.4,
+        description="Illustrated narrative. Slow pushes, drawn scenes.",
+        # 6.0s, not 3.8s.
+        #
+        # Measured against the illustrated story channels this is aimed at:
+        # one image every 6.7 seconds (26 cuts in 173s). A narrative shot needs
+        # time to be read - who is in it, where they are, what changed - and
+        # cutting every 3.8s turns a story into a montage. It also halves the
+        # number of images, which matters when each one takes 8 to 45 seconds
+        # to generate.
+        scene_seconds=6.0, words_per_second=2.4,
         font_scale=0.92, caption_style="karaoke",
         highlight_color="&H00B0B0FF", outline=6,
         transition="fade", transition_duration=0.55,
         motion_cycle=["zoom_in", "pan_left", "zoom_in", "pan_right"],
-        contrast=1.09, saturation=0.94,
-        visual_style_suffix=("moody atmospheric photography, heavy shadow, "
-                             "film grain, single light source"),
+        contrast=1.02, saturation=1.04,
+        # Drawn, not photographed - and prefer_ai below is what makes that
+        # instruction true rather than a description of a stock photo nobody
+        # is going to find.
+        visual_style_suffix=("2D illustrated storybook scene, clean line art, "
+                             "flat warm colours, hand-painted background, "
+                             "consistent art style"),
+        prefer_ai=True,
         music_mood="sombre",
     ),
     "TOP_5": StyleTemplate(
@@ -286,6 +308,17 @@ def caption_overrides(template: StyleTemplate,
         "captions.safe_bottom": template.safe_bottom,
         "captions.style": template.caption_style,
     }
+
+
+def visual_overrides(template: StyleTemplate) -> dict[str, Any]:
+    """Visual-source settings for this template.
+
+    Only returns prefer_ai when the template asks for it, so a template that
+    does not care leaves whatever the deployment configured alone.
+    """
+    if not template.prefer_ai:
+        return {}
+    return {"visuals.prefer_ai": True}
 
 
 def video_overrides(template: StyleTemplate) -> dict[str, Any]:

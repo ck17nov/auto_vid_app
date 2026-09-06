@@ -10,11 +10,12 @@ from ..core.config import Config
 from ..core.logging import log_event
 from ..core.models import Asset, Scene
 from ..core.util import ensure_dir, safe_write_json, sha1
+from .ai_image import AIImageProvider, build_backend
 from .base import VisualRequest
 from .kids_animation import KidsAnimationProvider
 from .procedural import ProceduralProvider
-from .providers import (PexelsProvider, PexelsVideoProvider, PixabayProvider,
-                        PollinationsProvider)
+from .providers import (PexelsProvider, PexelsVideoProvider,
+                        PixabayProvider)
 
 
 class VisualEngine:
@@ -33,17 +34,43 @@ class VisualEngine:
             "pexels_video": lambda: PexelsVideoProvider(cfg.secret("PEXELS_API_KEY")),
             "pexels": lambda: PexelsProvider(cfg.secret("PEXELS_API_KEY")),
             "pixabay": lambda: PixabayProvider(cfg.secret("PIXABAY_API_KEY")),
-            "pollinations": lambda: PollinationsProvider(
-                model=str(cfg.get("visuals.pollinations_model", "flux"))),
+            # Both names resolve to the same provider. "pollinations" is kept
+            # because existing configs and deployments name it.
+            "ai_image": lambda: AIImageProvider(build_backend(cfg)),
+            "pollinations": lambda: AIImageProvider(build_backend(cfg)),
             "procedural": ProceduralProvider,
         }
         # Stock photos are sharper -> try them first when keys exist. Stock
         # VIDEO goes ahead of everything: real footage is the difference
         # between a video and a narrated slideshow, and it costs the same key.
+        #
+        # UNLESS the job wants illustration. Stock cannot draw the same three
+        # children twice, so for an illustrated story the sharpest photograph
+        # in the world is the wrong asset - it breaks the visual world the
+        # narration is building. When `visuals.prefer_ai` is set, AI generation
+        # leads and stock stays behind it as the fallback that keeps a scene
+        # from going procedural.
+        prefer_ai = bool(cfg.get("visuals.prefer_ai", False))
         if allow_stock:
             for stock in ("pixabay", "pexels", "pexels_video"):
                 if stock not in order:
                     order.insert(0, stock)
+        if prefer_ai:
+            # Stock is REMOVED, not demoted.
+            #
+            # Demoting it looked reasonable and was wrong: on a three-scene
+            # test the AI provider was rate limited on one scene and that
+            # scene came back as Pexels stock FOOTAGE, so an illustrated story
+            # switched to live-action photography for six seconds and back.
+            # A consistent medium matters more than any single frame's
+            # fidelity, and mixing the two is worse than either alone.
+            #
+            # `procedural` stays as the last resort so a scene can never come
+            # back empty. It draws shapes rather than photographs, which is at
+            # least the same kind of image. If generation is unavailable for a
+            # whole job the result will look flat and the quality gate will say
+            # so - a visible, diagnosable failure instead of a silent mixture.
+            order = ["ai_image", "procedural"]
         chain = [registry[name]() for name in order if name in registry]
         if not any(p.name == "procedural" for p in chain):
             chain.append(ProceduralProvider())
@@ -58,7 +85,7 @@ class VisualEngine:
         self.kids_provider = None
         if bool(cfg.get("visuals.kids_animation", True)):
             photo = next((p for p in chain
-                          if p.name in ("pexels", "pixabay", "pollinations")
+                          if p.name in ("pexels", "pixabay", "ai_image")
                           and p.available()), None)
             self.kids_provider = KidsAnimationProvider(
                 fps=int(cfg.get("video.default_fps", 30)),
@@ -70,7 +97,8 @@ class VisualEngine:
                  made_for_kids: bool = False, width: int | None = None,
                  height: int | None = None,
                  parallel: int | None = None,
-                 durations: list[float] | None = None) -> list[Asset]:
+                 durations: list[float] | None = None,
+                 bible=None) -> list[Asset]:
         """Fetch/generate one conditioned image per scene.
 
         Scenes are processed concurrently because the network providers are
@@ -84,6 +112,11 @@ class VisualEngine:
         # the wall-clock cost is small next to the video encode.
         if parallel is None:
             parallel = int(self.cfg.get("visuals.parallel", 2))
+            # Generation is limited by CONCURRENCY, not by request count. Two
+            # simultaneous requests to the free endpoint get one image and one
+            # refusal, so the AI path runs narrower than the stock path.
+            if self.providers and self.providers[0].name == "ai_image":
+                parallel = int(self.cfg.get("visuals.ai_parallel", 1))
 
         # Rate limiting is a property of the PROVIDER, not of a scene. Retrying
         # a 429 per scene, three times each with exponential backoff, is
@@ -114,6 +147,11 @@ class VisualEngine:
                 # 8-second scene, which loops visibly.
                 min_seconds=(durations[scene.index]
                              if durations and scene.index < len(durations) else 0.0),
+                # Only the cast this scene refers to, so the description does
+                # not crowd out the scene itself.
+                characters=(bible.clause_for(scene.narration,
+                                             scene.visual_prompt)
+                            if bible else ""),
             )
             target = out_dir / f"image_{scene.index:02d}.jpg"
             errors: list[str] = []

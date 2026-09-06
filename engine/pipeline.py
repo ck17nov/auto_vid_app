@@ -44,7 +44,8 @@ from .video.captions import CaptionEngine
 from .video.compose import SceneTiming, VideoComposer, assign_motion, cleanup_clips
 from .video.music import build_music, build_transition_sfx
 from .video.templates import (apply_to_profile, caption_overrides,
-                              select_template, video_overrides)
+                              select_template, video_overrides,
+                              visual_overrides)
 from .visuals.engine import VisualEngine
 from .youtube.auth import YouTubeAuth
 from .youtube.upload import YouTubeUploader
@@ -479,6 +480,26 @@ class Pipeline:
         self.db.save_job(job)
         return job_dir / "voice.wav", total, offsets
 
+    def _character_bible(self, job_dir: Path, script: Script):
+        """The recurring cast, or None when it would not be used.
+
+        Returns None rather than an empty bible when disabled, so the visual
+        engine can skip the per-scene lookup entirely.
+        """
+        if not bool(self.cfg.get("visuals.character_bible", True)):
+            return None
+        if not bool(self.cfg.get("visuals.prefer_ai", False)):
+            # Stock photography cannot honour a character description, so
+            # asking for one is a wasted call.
+            return None
+        from .content.characters import build_bible
+        scenes = script.scene_objects()
+        narration = "\n".join(f"{i}. {s.narration}" for i, s in enumerate(scenes))
+        bible = build_bible(narration, self.router)
+        if bible:
+            bible.save(job_dir / "character_bible.json")
+        return bible or None
+
     def stage_visuals(self, job: VideoJob, request: AutomationRequest, profile,
                       script: Script) -> list:
         self._advance(job, JobStatus.VISUALS, f"scenes={len(script.scenes)}")
@@ -492,10 +513,19 @@ class Pipeline:
         # clips shorter than the scene, which would otherwise loop visibly.
         durations = [s.duration or 0.0 for s in scenes]
 
+        # Fix the cast before any image is generated.
+        #
+        # Only worth the extra LLM call when the images are drawn: a stock
+        # photograph is not going to honour a character description, so for
+        # factual content this is pure cost. Built once and reused for every
+        # scene, because the entire point is that the descriptions do not
+        # change between shots.
+        bible = self._character_bible(job_dir, script)
+
         assets = self._retry("visuals", lambda: self.visual_engine.generate(
             scenes, job_dir / "assets", style=request.style,
             made_for_kids=profile.made_for_kids, width=w, height=h,
-            durations=durations), job)
+            durations=durations, bible=bible), job)
 
         script.scenes = [s.to_dict() for s in scenes]
         job.script = script.to_dict()
@@ -738,10 +768,17 @@ class Pipeline:
             self.cfg.set(key, value)
         for key, value in video_overrides(template).items():
             self.cfg.set(key, value)
+        # Must be applied BEFORE the visual engine is rebuilt below: the
+        # provider chain is decided at construction time.
+        for key, value in visual_overrides(template).items():
+            self.cfg.set(key, value)
 
-        # These two cached the previous settings at construction time.
+        # These cached the previous settings at construction time.
         self.caption_engine = CaptionEngine(self.cfg)
         self.composer = VideoComposer(self.cfg)
+        # The visual engine caches its PROVIDER CHAIN, so a template asking
+        # for illustration would otherwise be ignored for the whole process.
+        self.visual_engine = VisualEngine(self.cfg)
         self._motion_cycle = list(template.motion_cycle)
 
         log_event("PIPELINE", "style template selected", template=template.name,

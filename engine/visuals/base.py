@@ -28,6 +28,12 @@ class VisualRequest:
     # avoid picking a 2-second clip for an 8-second scene and looping it
     # visibly.
     min_seconds: float = 0.0
+    # Appearance of the people in THIS scene, e.g. "RAJU is a 10-year-old boy
+    # with short black hair in a green shirt". Only the AI provider uses it,
+    # and only for characters the scene actually mentions - sending the whole
+    # cast every time buries the scene description and the model starts
+    # drawing a character line-up instead of a story beat.
+    characters: str = ""
 
 
 class VisualProvider(Protocol):

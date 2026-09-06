@@ -125,14 +125,43 @@ visuals:
   # is set (same key as the photos). Real footage is the difference between a
   # video and a narrated slideshow. Remove it from the order below to force
   # stills only.
-  provider_order: [pexels_video, pexels, pixabay, pollinations, procedural]
+  provider_order: [pexels_video, pexels, pixabay, ai_image, procedural]
   image_width: 1080
   image_height: 1920
   # Never reuse copyrighted YouTube footage - see CONTENT_POLICY.md
   allow_stock_apis: true
-  pollinations_model: flux
+  # Which service generates the images.
+  #
+  #   pollinations  - keyless, free, no account. Painterly house style; it
+  #                   will NOT produce flat-colour anime line art, whatever
+  #                   the prompt says. This is the zero-cost default.
+  #   huggingface   - free account + HF_API_TOKEN. Runs any text-to-image repo
+  #                   on the Inference API, so an anime-tuned checkpoint named
+  #                   in ai_image_model actually draws in that style. This is
+  #                   the path to a Ghibli-style channel look.
+  ai_image_backend: pollinations
+  # Used by the huggingface backend. Ignored by pollinations.
+  ai_image_model: black-forest-labs/FLUX.1-schnell
+  pollinations_model: sana
+  # Put AI generation AHEAD of stock photography.
+  #
+  # For an illustrated story this is the setting that matters. Stock is
+  # sharper, but it cannot draw the same three children twice, and a
+  # photograph dropped between two illustrations breaks the world the
+  # narration is building. Leave it off for factual content, where a real
+  # photograph of a real thing is worth more than a drawing of it.
+  #
+  # Generation is slow - measured 8 to 45 seconds per image, so a 30-minute
+  # video is hours of generation. Turn this on for content where it pays.
+  prefer_ai: false
+  # Ask the model who recurs in the script and repeat their description in
+  # every scene they appear in. Costs one extra LLM call per job.
+  character_bible: true
   # Concurrency is what trips free-tier rate limits; 2 is the sweet spot.
   parallel: 2
+  # ...and 1 for AI generation, which is limited by simultaneous requests
+  # rather than by how many you make. At 2, one of every pair was refused.
+  ai_parallel: 1
   transient_retries: 3
   retry_backoff_seconds: 5
   # Drop a provider for the rest of the job once it has failed this many

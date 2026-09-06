@@ -2,10 +2,10 @@
 
 Why this order (quality-driven):
   Pexels / Pixabay return real photographs at 3000-6000 px.  Cropped to
-  1080x1920 they are genuinely sharp and hold up under Ken Burns zoom.
-  Pollinations (free, keyless) caps output near 576x1024, which needs ~2x
-  upscaling and looks soft by comparison - so it is used for concepts stock
-  libraries cannot cover, not as the default.
+  1080x1920 they are genuinely sharp and hold up under Ken Burns zoom, so they
+  lead for factual content.  For illustrated storytelling the trade reverses -
+  see engine/visuals/ai_image.py, which leads when `visuals.prefer_ai` is set,
+  because no stock library can draw the same character twice.
 
 Licensing: Pexels and Pixabay licences both permit commercial use including
 monetised YouTube video, with no attribution required (attribution is still
@@ -13,12 +13,10 @@ recorded in the AssetManifest).  See docs/SERVICE_COSTS.md.
 """
 from __future__ import annotations
 
-import urllib.parse
 from pathlib import Path
 
 import httpx
 
-from ..core.logging import log_event
 from ..core.models import Asset
 from ..core.util import STOPWORDS, probe_duration, words
 from .base import VisualRequest, condition_image, is_valid_image
@@ -123,58 +121,6 @@ class PixabayProvider:
                      license=self.license_note, prompt=query,
                      attribution=f"Image by {hit.get('user', 'unknown')} on Pixabay",
                      url=hit.get("pageURL", ""), scene_index=req.scene_index)
-
-
-class PollinationsProvider:
-    """Free, keyless text-to-image.
-
-    Reality check (spec section 41): no account needed, but it is rate limited,
-    sometimes slow (8-60 s), and caps resolution near 576x1024.  Treated as a
-    concept generator, not a high-resolution source.
-    """
-
-    name = "pollinations"
-    license_note = "AI-generated (Pollinations, flux) - no third-party rights claimed"
-
-    def __init__(self, timeout: int = 110, model: str = "flux"):
-        self.timeout = timeout
-        self.model = model
-
-    def available(self) -> bool:
-        return True
-
-    def fetch(self, req: VisualRequest, out_path: Path) -> Asset:
-        prompt = req.prompt.strip()
-        if req.style:
-            prompt = f"{prompt}, {req.style}"
-        # Steer away from artefacts that ruin a Short.
-        prompt += (", no text, no watermark, no letters, no logo, "
-                   "highly detailed, sharp focus, professional photography")
-        if req.made_for_kids:
-            prompt += ", friendly, gentle, child-safe, no scary elements"
-
-        # Ask for the target aspect; the service picks its own capped size.
-        url = ("https://image.pollinations.ai/prompt/"
-               + urllib.parse.quote(prompt, safe="")
-               + f"?width={req.width}&height={req.height}&nologo=true"
-               + f"&model={self.model}&seed={req.seed or req.scene_index + 1}")
-        with httpx.Client(timeout=self.timeout, headers=_UA,
-                          follow_redirects=True) as client:
-            resp = client.get(url)
-            resp.raise_for_status()
-            if "image" not in resp.headers.get("content-type", ""):
-                raise RuntimeError("pollinations: response was not an image")
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_bytes(resp.content)
-
-        if not is_valid_image(out_path):
-            raise RuntimeError("pollinations: downloaded file is not a valid image")
-        condition_image(out_path, req.width, req.height, sharpen=True)
-        log_event("VISUAL", "AI image generated", scene=req.scene_index,
-                  model=self.model)
-        return Asset(asset=out_path.name, source="generated:pollinations",
-                     license=self.license_note, prompt=prompt[:400],
-                     scene_index=req.scene_index)
 
 
 class PexelsVideoProvider:
