@@ -88,7 +88,20 @@ open class BaseViewModel : ViewModel() {
             val result = block()
             _busy.value = false
             result.fold(
-                onSuccess = onSuccess,
+                onSuccess = {
+                    // Clear a stale error before running the success handler.
+                    //
+                    // Without this, the first failure stuck to the screen for
+                    // the rest of the session. A fresh install times out
+                    // against the default backend address before the user has
+                    // set a URL, so the Create tab kept showing "cannot reach
+                    // the backend" over a niche profile it had just fetched
+                    // successfully - while the Dashboard, whose own call had
+                    // succeeded, showed connected. The banner was the bug; the
+                    // backend was fine.
+                    if (_message.value?.isError == true) _message.value = null
+                    onSuccess(it)
+                },
                 onFailure = { error(it.message ?: "Something went wrong") },
             )
         }

@@ -198,7 +198,7 @@ fun SettingsScreen() {
             value = oauthClientId,
             onValueChange = { oauthClientId = it; store.oauthClientId = it },
             label = { Text("Android OAuth client ID") },
-            placeholder = { Text("xxxx.apps.googleusercontent.com") },
+            placeholder = { Text("123456789012-abc123def.apps.googleusercontent.com") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )

@@ -203,7 +203,16 @@ fun DashboardScreen(
         // ---- approvals -------------------------------------------------
         if (awaiting.isNotEmpty()) {
             item { SectionTitle("Waiting for your approval") }
-            items(awaiting, key = { it.jobId }) { job ->
+            // Keys are namespaced per section, NOT the bare job id.
+            //
+            // A job awaiting approval is in both `awaiting` and `jobs`, so a
+            // bare jobId appeared twice in one LazyColumn. Compose's
+            // SaveableStateHolder throws "Key was used multiple times" the
+            // moment both copies are composed - which is why the app died on
+            // scroll, and on launch once a job was near the top, and why the
+            // only apparent cure was clearing app data: that wiped the job
+            // database and with it the duplicate.
+            items(awaiting, key = { "approval-${it.jobId}" }) { job ->
                 ApprovalCard(
                     job = job,
                     onOpen = { onOpenJob(job.jobId) },
@@ -235,7 +244,7 @@ fun DashboardScreen(
                 )
             }
         } else {
-            items(jobs.take(20), key = { it.jobId }) { job ->
+            items(jobs.take(20), key = { "recent-${it.jobId}" }) { job ->
                 JobRow(job = job, onClick = { onOpenJob(job.jobId) })
             }
         }

@@ -21,6 +21,10 @@ android {
 
         // Default backend address. Overridable at runtime in Settings.
         // 10.0.2.2 is the host machine as seen from the Android emulator.
+        // Placeholder only. Retrofit needs a parseable base URL to build a
+        // service, but this address (the emulator's view of the host) is never
+        // dialled: the repository refuses to call anything while the
+        // configured URL is blank.
         buildConfigField("String", "DEFAULT_BACKEND_URL", "\"http://10.0.2.2:8099/\"")
 
         // OAuth redirect scheme. A Google *Android* OAuth client is validated

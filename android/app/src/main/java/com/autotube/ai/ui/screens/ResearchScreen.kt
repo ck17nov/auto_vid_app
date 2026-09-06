@@ -119,16 +119,18 @@ fun ResearchScreen() {
 
             if (r.gaps.isNotEmpty()) {
                 item { SectionTitle("Content opportunities") }
-                items(r.gaps, key = { it.topic }) { gap -> GapCard(gap) }
+                // Namespaced: a topic can be both a gap and a cluster, and a duplicate
+                // key in one LazyColumn is a crash, not a glitch.
+                items(r.gaps, key = { "gap-${it.topic}" }) { gap -> GapCard(gap) }
             }
 
             if (r.clusters.isNotEmpty()) {
                 item { SectionTitle("Topic momentum") }
-                items(r.clusters.take(6), key = { it.topic }) { c -> ClusterRow(c) }
+                items(r.clusters.take(6), key = { "cluster-${it.topic}" }) { c -> ClusterRow(c) }
             }
 
             item { SectionTitle("Top videos (${r.videos.size})") }
-            items(r.videos, key = { it.videoId }) { v -> ResearchVideoRow(v) }
+            items(r.videos, key = { "live-${it.videoId}" }) { v -> ResearchVideoRow(v) }
         }
 
         if (result == null && !busy) {
@@ -142,7 +144,7 @@ fun ResearchScreen() {
                 }
             } else {
                 item { SectionTitle("Cached results") }
-                items(cached, key = { it.videoId }) { entity ->
+                items(cached, key = { "cached-${it.videoId}" }) { entity ->
                     ResearchVideoRow(
                         ResearchVideoDto(
                             videoId = entity.videoId,

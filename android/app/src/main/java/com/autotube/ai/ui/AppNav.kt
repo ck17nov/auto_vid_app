@@ -48,8 +48,13 @@ sealed class Dest(val route: String, val label: String, val icon: ImageVector?) 
 // Analytics removed on purpose. Every figure it showed comes from the YouTube
 // Analytics API, which spends the same daily quota the uploads need - and the
 // YouTube Studio app shows the same numbers for free. Not worth the quota.
+//
+// Settings IS in the bar. It used to be reachable only from a prompt on the
+// Dashboard, and that screen has no navigation of its own - so setting the
+// backend URL was a one-way trip with nothing but the system back gesture to
+// get out of it. It takes the slot Analytics vacated.
 private val bottomBar = listOf(
-    Dest.Dashboard, Dest.Create, Dest.Research, Dest.Scheduler,
+    Dest.Dashboard, Dest.Create, Dest.Research, Dest.Scheduler, Dest.Settings,
 )
 
 @Composable

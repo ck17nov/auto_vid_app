@@ -240,6 +240,21 @@ class AutoTubeRepository(
      */
     private suspend fun <T> call(block: suspend () -> T): Result<T> =
         withContext(Dispatchers.IO) {
+            // Fail immediately when no backend is configured.
+            //
+            // Otherwise the client falls back to the build's default address,
+            // which is the emulator's host loopback (10.0.2.2) and unroutable
+            // from a real phone. The user waited twenty seconds for a
+            // connect timeout and got "cannot reach the backend" - accurate,
+            // useless, and pointing at an address they never typed.
+            if (store.backendUrl.isBlank()) {
+                return@withContext Result.failure(
+                    RepositoryException(
+                        "No backend URL set yet. Open Settings and enter the " +
+                            "backend URL and API key."
+                    )
+                )
+            }
             try {
                 Result.success(block())
             } catch (e: HttpException) {

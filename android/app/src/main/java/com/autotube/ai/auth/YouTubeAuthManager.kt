@@ -53,10 +53,13 @@ class YouTubeAuthManager(context: Context, private val store: SecureStore) {
         // with a bare "invalid request" page that names nothing, so a client
         // secret pasted into this field, or a truncated id, sends the user
         // hunting through Google Cloud for a fault that is in the app.
-        require(clientId.endsWith(GOOGLE_CLIENT_SUFFIX)) {
-            "That does not look like an OAuth client ID. It must end in " +
-                "\"$GOOGLE_CLIENT_SUFFIX\". Do not paste the client secret " +
-                "- an Android client does not have one."
+        require(CLIENT_ID_PATTERN.matches(clientId)) {
+            "That is not a Google OAuth client ID. A real one starts with " +
+                "your project number, like " +
+                "123456789012-abc123def.apps.googleusercontent.com. Copy it " +
+                "from Google Cloud > APIs & Services > Credentials, from an " +
+                "OAuth client whose type is Android. Do not paste the client " +
+                "secret - an Android client does not have one."
         }
         val request = AuthorizationRequest.Builder(
             serviceConfig,
@@ -167,7 +170,18 @@ class YouTubeAuthManager(context: Context, private val store: SecureStore) {
         /** Exactly what has to be registered in Google Cloud. */
         val redirectUri: String = "$REDIRECT_SCHEME:/oauth2redirect"
 
-        const val GOOGLE_CLIENT_SUFFIX = ".apps.googleusercontent.com"
+        /**
+         * A Google OAuth client ID always begins with the project number.
+         *
+         * Checking only the ".apps.googleusercontent.com" suffix let an
+         * invented value through, and Google answered it with the same
+         * unhelpful "invalid request" page it gives every other
+         * misconfiguration. The leading digits are the part nobody can guess,
+         * so they are the part worth checking. The hyphenated segment is
+         * optional: very old clients were issued without one.
+         */
+        val CLIENT_ID_PATTERN =
+            Regex("^\\d+(-[A-Za-z0-9_]+)?\\.apps\\.googleusercontent\\.com$")
 
         /**
          * SHA-1 of the certificate this APK is actually signed with.
