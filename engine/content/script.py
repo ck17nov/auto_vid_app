@@ -130,6 +130,65 @@ def _structure(duration: int, is_short: bool) -> list[tuple[str, str, float]]:
     ]
 
 
+# Writing system per language, named explicitly in the prompt.
+#
+# Asking for "language code: hi" and "native phrasing" is not enough: the model
+# answered in romanised Hinglish - "Jab suraj dhalta hai to pyare badal kahan
+# sote hain?" - which is correct Hindi in the wrong alphabet. That breaks two
+# things at once. The captions are burnt in verbatim, so a Hindi viewer reads
+# transliteration; and the TTS voice is handed Latin text, which it pronounces
+# with English phonetics, so the narration comes out mangled. The script has to
+# be named, and transliteration has to be refused.
+_SCRIPTS = {
+    "hi": "Devanagari (देवनागरी)",
+    "mr": "Devanagari (देवनागरी)",
+    "ne": "Devanagari (देवनागरी)",
+    "bn": "Bengali (বাংলা)",
+    "ta": "Tamil (தமிழ்)",
+    "te": "Telugu (తెలుగు)",
+    "kn": "Kannada (ಕನ್ನಡ)",
+    "ml": "Malayalam (മലയാളം)",
+    "gu": "Gujarati (ગુજરાતી)",
+    "pa": "Gurmukhi (ਗੁਰਮੁਖੀ)",
+    "or": "Odia (ଓଡ଼ିଆ)",
+    "ur": "Urdu (اردو)",
+    "ar": "Arabic (العربية)",
+    "ru": "Cyrillic",
+    "ja": "Japanese (kanji, hiragana and katakana)",
+    "ko": "Hangul (한글)",
+    "zh": "Chinese characters",
+    "th": "Thai (ไทย)",
+    "el": "Greek",
+    "he": "Hebrew (עברית)",
+}
+
+
+def _language_line(language: str) -> str:
+    """The language instruction, including the writing system to use."""
+    if language.startswith("en"):
+        return "Write the narration in English."
+    if language.lower() in ("hi-latn", "hinglish"):
+        # Deliberately exempt from the native-script rule below. Hinglish IS
+        # Latin-script Hindi mixed with English; demanding Devanagari would be
+        # asking for something else entirely.
+        return ("Write the narration in Hinglish: natural Hindi-English "
+                "code-mixing as spoken in urban India, written in Latin "
+                "letters. Keep common English words in English rather than "
+                "translating them. Do not write in Devanagari.")
+    base = language.split("-")[0].lower()
+    line = (f"Write the narration in this language code: {language}. "
+            f"Natural native phrasing, not translated English.")
+    script = _SCRIPTS.get(base)
+    if script:
+        line += (f" Write it in the {script} script - the real alphabet of the "
+                 f"language. Do NOT romanise or transliterate into Latin "
+                 f"letters: the text is both spoken aloud by a text-to-speech "
+                 f"voice and printed on screen as subtitles, and Latin-letter "
+                 f"transliteration is mispronounced and unreadable for native "
+                 f"speakers.")
+    return line
+
+
 class ScriptGenerator:
     def __init__(self, cfg: Config, router: LLMRouter | None = None):
         self.cfg = cfg
@@ -453,10 +512,7 @@ Return this exact JSON shape and nothing else:
         point_lines = "\n".join(f"  - {str(p).strip()}" for p in points) or "  - (none given)"
         already = ("\nSECTIONS ALREADY WRITTEN (do not repeat these):\n"
                    + "\n".join(f"  - {c}" for c in covered)) if covered else ""
-        lang_line = ("Write the narration in English."
-                     if language.startswith("en") else
-                     f"Write the narration in this language code: {language}. "
-                     f"Natural native phrasing, not translated English.")
+        lang_line = _language_line(language)
         kids_line = ""
         if profile.made_for_kids:
             kids_line = ("\nTHIS IS CHILD-DIRECTED CONTENT. Simple words, one "
@@ -542,10 +598,7 @@ Return this exact JSON shape and nothing else:
         beats = "\n".join(
             f"- {role.upper()} (~{int(frac * duration)}s): {purpose}"
             for role, purpose, frac in structure)
-        lang_line = ("Write the narration in English."
-                     if language.startswith("en") else
-                     f"Write the narration in this language code: {language}. "
-                     f"Natural native phrasing, not translated English.")
+        lang_line = _language_line(language)
         kids_line = ""
         if profile.made_for_kids:
             kids_line = (

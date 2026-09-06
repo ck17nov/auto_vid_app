@@ -140,7 +140,12 @@ TEMPLATES: dict[str, StyleTemplate] = {
         scene_seconds=4.2, visual_frequency=0.8, words_per_second=2.0,
         font_scale=0.90, uppercase=False,
         caption_style="block",                  # never flash single words at kids
-        highlight_color="&H0080E0FF", outline=6, safe_bottom=0.26,
+        # safe_bottom was 0.26, which put the caption 26% up from the bottom
+        # of a 1920-tall frame - straight through the word label the kids
+        # animation draws at 0.62. The two were designed separately and
+        # overlapped on screen: "me ghoom kar" printed across "CLOUD". 0.17
+        # sits clear of the label and still above YouTube's Shorts overlay.
+        highlight_color="&H0080E0FF", outline=6, safe_bottom=0.17,
         transition="fade", transition_duration=0.65,
         motion_cycle=["zoom_in", "pan_right", "zoom_out", "pan_left"],
         contrast=1.02, saturation=1.06,

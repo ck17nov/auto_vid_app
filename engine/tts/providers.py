@@ -30,6 +30,11 @@ EDGE_VOICES: dict[str, dict[str, list[str]]] = {
               "male":   ["en-IN-PrabhatNeural"]},
     "en-GB": {"female": ["en-GB-SoniaNeural"], "male": ["en-GB-RyanNeural"]},
     "hi":    {"female": ["hi-IN-SwaraNeural"], "male": ["hi-IN-MadhurNeural"]},
+    # Hinglish is Hindi-English code-mixing written in Latin script, which is
+    # how people actually write it. An Indian-English voice reads that
+    # correctly; the Hindi voices expect Devanagari and mispronounce it.
+    "hi-Latn": {"female": ["en-IN-NeerjaNeural", "en-IN-NeerjaExpressiveNeural"],
+                "male":   ["en-IN-PrabhatNeural"]},
     "ta":    {"female": ["ta-IN-PallaviNeural"], "male": ["ta-IN-ValluvarNeural"]},
     "te":    {"female": ["te-IN-ShrutiNeural"], "male": ["te-IN-MohanNeural"]},
     "bn":    {"female": ["bn-IN-TanishaaNeural"], "male": ["bn-IN-BashkarNeural"]},
@@ -266,13 +271,29 @@ def to_wav(src: Path, dst: Path, sample_rate: int = 48000) -> Path:
     """Decode to 48 kHz mono WAV and lightly condition the voice.
 
     - highpass 80 Hz  : removes rumble the phone speaker cannot reproduce
-    - lowpass 12 kHz  : tames TTS sibilance
     - dynaudnorm      : evens out level without pumping
     Loudness targeting happens later, on the full mix (two-pass loudnorm).
+
+    THERE IS NO LOWPASS HERE, AND ADDING ONE AT 12 kHz WILL BRING BACK THE BEEP.
+
+    The chain used to include `lowpass=f=12000` to "tame TTS sibilance". edge-tts
+    returns 24 kHz audio, and ffmpeg applies -af at the decoded source rate and
+    only resamples afterwards - so that cutoff sat exactly at Nyquist (sr / 2).
+    ffmpeg's `lowpass` is a bilinear-transform biquad, and the prewarp term
+    tan(pi * f / sr) diverges as f approaches sr / 2, leaving coefficients that
+    ring instead of attenuating. Fed real speech, the filter self-oscillated and
+    printed a sustained tone at exactly 12000.0 Hz, measured 35 dB above the
+    voice fundamental - the high-pitched beep audible under every single video.
+
+    It was also pointless: a 24 kHz stream holds nothing above 12 kHz to remove.
+
+    If sibilance ever does need taming, the cutoff must be derived from the
+    actual source rate and kept well below Nyquist. A fixed 12 kHz is only safe
+    for sources at 32 kHz or above, which this provider is not.
     """
     dst.parent.mkdir(parents=True, exist_ok=True)
     run([ffmpeg_bin(), "-y", "-loglevel", "error", "-i", str(src),
-         "-af", "highpass=f=80,lowpass=f=12000,dynaudnorm=f=180:g=11:p=0.9:m=8",
+         "-af", "highpass=f=80,dynaudnorm=f=180:g=11:p=0.9:m=8",
          "-ar", str(sample_rate), "-ac", "1", "-c:a", "pcm_s16le", str(dst)],
         timeout=300)
     return dst

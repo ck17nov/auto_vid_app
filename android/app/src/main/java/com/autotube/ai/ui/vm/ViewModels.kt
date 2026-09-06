@@ -158,7 +158,21 @@ class DashboardViewModel(
     }
 
     fun approve(jobId: String) = runTask<Unit>({
-        info("Approved. Uploading or scheduling now.")
+        // Do not promise an upload the backend cannot perform.
+        //
+        // In dry-run mode the backend renders everything and uploads nothing,
+        // so "Uploading or scheduling now" was simply false - the video never
+        // appeared in Schedule because no publishAt was ever set, and there
+        // was nothing on screen to explain why.
+        if (_health.value?.dryRun != false) {
+            info(
+                "Approved. The backend is in DRY RUN, so the video is rendered " +
+                    "but not uploaded and will not appear in Schedule. Set " +
+                    "dry_run: false on the backend to publish."
+            )
+        } else {
+            info("Approved. Uploading or scheduling now.")
+        }
         refresh()
     }) { repo.approve(jobId) }
 

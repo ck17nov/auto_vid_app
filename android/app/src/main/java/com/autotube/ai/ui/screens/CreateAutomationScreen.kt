@@ -65,15 +65,17 @@ val KIDS_NICHES = setOf(
     "kids bedtime stories", "kids alphabet learning", "kids numbers and counting",
 )
 
+// Four languages, not twelve.
+//
+// The backend still has voices for more, but offering them here invited a
+// choice nobody wanted to make. "hi-Latn" is Hinglish: Latin-script
+// Hindi-English code-mixing, voiced by an Indian-English speaker, because a
+// Hindi voice expects Devanagari and mispronounces romanised text.
 val LANGUAGES = listOf(
     "hi" to "Hindi",
     "en-IN" to "Indian English",
     "en" to "English",
-    "ta" to "Tamil",
-    "te" to "Telugu",
-    "bn" to "Bengali",
-    "mr" to "Marathi",
-    "gu" to "Gujarati",
+    "hi-Latn" to "Hinglish",
 )
 
 val STYLES = listOf(

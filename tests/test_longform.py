@@ -1879,3 +1879,123 @@ class TestVoiceProviderCapabilities:
         assert "supports_boundary" in code, \
             "the boundary argument must be conditional on the installed version"
         assert 'extra = {"boundary": "WordBoundary"} if supports_boundary else {}' in code
+
+# ==========================================================================
+# Script language
+# ==========================================================================
+class TestNativeScript:
+    """A language code is not a writing system.
+
+    Asking for "language code: hi" produced romanised Hinglish - correct Hindi
+    in the wrong alphabet. The captions are burnt in verbatim, so a Hindi
+    viewer read transliteration, and the TTS voice was handed Latin text and
+    pronounced it with English phonetics.
+    """
+
+    def test_hindi_asks_for_devanagari_and_forbids_romanising(self):
+        from engine.content.script import _language_line
+        line = _language_line("hi")
+        assert "Devanagari" in line
+        assert "Do NOT romanise" in line
+
+    def test_english_says_nothing_about_scripts(self):
+        from engine.content.script import _language_line
+        assert _language_line("en") == "Write the narration in English."
+        assert "romanise" not in _language_line("en-IN")
+
+    def test_every_language_the_app_offers_names_its_script(self):
+        from engine.content.script import _language_line
+        # Exactly the list in the Android Create screen.
+        for code in ("hi", "ta", "te", "bn", "mr", "gu"):
+            line = _language_line(code)
+            assert "script" in line, code
+            assert "Do NOT romanise" in line, code
+
+    def test_hinglish_is_exempt_from_the_native_script_rule(self):
+        """Hinglish IS Latin-script Hindi; demanding Devanagari breaks it."""
+        from engine.content.script import _language_line
+        line = _language_line("hi-Latn")
+        assert "Hinglish" in line
+        assert "Latin letters" in line
+        assert "Do NOT romanise" not in line
+
+    def test_hinglish_uses_an_indian_english_voice(self):
+        """A Hindi voice expects Devanagari and mispronounces Latin text."""
+        from engine.tts.providers import EDGE_VOICES
+        assert "hi-Latn" in EDGE_VOICES
+        assert EDGE_VOICES["hi-Latn"]["female"][0].startswith("en-IN-")
+
+    def test_an_unmapped_language_still_gets_a_usable_instruction(self):
+        from engine.content.script import _language_line
+        line = _language_line("fr")
+        assert "fr" in line
+        # No script claim we cannot back up.
+        assert "Do NOT romanise" not in line
+
+    def test_both_prompt_builders_use_the_helper(self):
+        """A fix applied to one prompt and not the other is not a fix."""
+        import inspect
+        from engine.content import script as mod
+        source = inspect.getsource(mod)
+        assert source.count("_language_line(language)") >= 2
+
+# ==========================================================================
+# The 12 kHz beep
+# ==========================================================================
+class TestNoNyquistLowpass:
+    """The beep audible under every video was a filter, not the music.
+
+    `lowpass=f=12000` in the voice conditioning chain sat exactly at Nyquist
+    for edge-tts's 24 kHz output. ffmpeg applies -af at the decoded source
+    rate and resamples afterwards, and its `lowpass` is a bilinear-transform
+    biquad whose prewarp tan(pi * f / sr) diverges at sr / 2 - so instead of
+    attenuating it rang, printing a sustained 12000.0 Hz tone measured 35 dB
+    above the voice fundamental.
+
+    There is no offline reproduction: pink noise and synthetic tone bursts both
+    pass the filter unchanged, because exciting the ring needs the broadband
+    content of real decoded speech. So this guards the rule rather than the
+    symptom - which is what would actually have caught it.
+    """
+
+    # Lowest sample rate any configured voice provider returns. edge-tts is
+    # 24 kHz; a cutoff must stay clear of half of that.
+    MIN_PROVIDER_RATE = 24_000
+
+    def _cutoffs(self) -> list[int]:
+        import inspect
+        import re
+        from engine.tts import providers
+        source = inspect.getsource(providers.to_wav)
+        # Only the executable filter string, not the docstring that explains
+        # the bug - otherwise the test passes on its own explanation.
+        body = source.split('"""')[-1]
+        return [int(m) for m in re.findall(r"lowpass=f=(\d+)", body)]
+
+    def test_the_voice_chain_has_no_lowpass_at_all(self):
+        assert self._cutoffs() == [], (
+            "a lowpass reappeared in the voice conditioning chain; at 24 kHz "
+            "it has nothing to remove and rings at Nyquist"
+        )
+
+    def test_any_future_cutoff_stays_clear_of_nyquist(self):
+        limit = self.MIN_PROVIDER_RATE / 2
+        for cutoff in self._cutoffs():
+            assert cutoff < limit * 0.85, (
+                f"lowpass={cutoff} Hz is at or near Nyquist "
+                f"({limit:.0f} Hz) for a {self.MIN_PROVIDER_RATE} Hz source"
+            )
+
+    def test_the_highpass_and_levelling_are_still_there(self):
+        """Removing the lowpass must not have taken the rest with it."""
+        import inspect
+        from engine.tts import providers
+        body = inspect.getsource(providers.to_wav).split('"""')[-1]
+        assert "highpass=f=80" in body
+        assert "dynaudnorm" in body
+
+    def test_the_music_bed_lowpasses_are_far_below_nyquist(self):
+        """The music bed legitimately uses lowpass - at 48 kHz, and low."""
+        from engine.video.music import MOODS
+        for name, spec in MOODS.items():
+            assert spec["lowpass"] < 8000, name

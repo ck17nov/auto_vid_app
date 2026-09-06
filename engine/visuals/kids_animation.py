@@ -63,9 +63,21 @@ _DRAWABLE = {
 # clear on purpose: the compose stage burns captions there and knows nothing
 # about this artwork, so a card reaching into that band gets narration printed
 # across it.
-LETTER_Y = 0.12          # centre of the bouncing letter
-CARD_TOP = 0.24          # top of the picture card
-WORD_Y = 0.62            # top of the word pill under the card
+LETTER_Y = 0.12          # centre of the bouncing letter (alphabet mode)
+CARD_TOP = 0.24          # top of the picture card WHEN a letter is shown
+CARD_TOP_NO_LETTER = 0.15  # ... and when it is not, so the card can be bigger
+WORD_Y = 0.615           # top of the word pill under the card
+
+# Widest the card may be, as a fraction of frame width and height.
+#
+# The first version used min(w * 0.62, h * 0.30), where on a 1080x1920 Short
+# the height term wins and the card comes out 576px - just over half the width,
+# floating in an otherwise empty frame. On a phone it reads as a small square
+# box rather than a picture. The card is the entire subject of the shot, so it
+# should dominate: it now fills most of the width, and the height allowance is
+# raised to match rather than to constrain.
+CARD_MAX_W = 0.84
+CARD_MAX_H = 0.44
 
 
 def _hex(value: str) -> tuple[int, int, int]:
@@ -350,8 +362,10 @@ class KidsAnimationProvider:
         # printed across a sunrise. Captions are added later by the compose
         # stage and know nothing about this artwork, so the artwork has to
         # yield the space.
-        card = int(min(w * 0.62, h * 0.30))
-        card_top = int(h * CARD_TOP)
+        card = int(min(w * CARD_MAX_W, h * CARD_MAX_H))
+        # Alphabet mode keeps the letter above the card, so the card starts
+        # lower. A story has no letter, so it reclaims that space.
+        card_top = int(h * (CARD_TOP if letter else CARD_TOP_NO_LETTER))
         card_box_base = (int(w / 2 - card / 2), card_top,
                          int(w / 2 + card / 2), card_top + card)
 
@@ -378,7 +392,13 @@ class KidsAnimationProvider:
 
             # Card scales in with an overshoot, then breathes very slightly.
             intro = min(t / 0.28, 1.0)
-            scale = 0.55 + 0.45 * _ease_out_back(intro)
+            # Starts at 0.90, not 0.55.
+            #
+            # A pop from just over half size means that for the first third of
+            # a second of every scene the card really is a small box, and on a
+            # four-second cut that is a lot of the shot. The overshoot still
+            # reads as a pop without the card ever looking tiny.
+            scale = 0.90 + 0.10 * _ease_out_back(intro)
             breathe = 1.0 + 0.012 * math.sin(t * 2 * math.pi * 1.4)
             s = scale * breathe
             cx = (card_box_base[0] + card_box_base[2]) / 2
