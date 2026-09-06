@@ -10,14 +10,12 @@ import androidx.compose.ui.platform.LocalContext
 import com.autotube.ai.AutoTubeApp
 import com.autotube.ai.data.local.AnalyticsEntity
 import com.autotube.ai.data.local.JobEntity
-import com.autotube.ai.data.local.ResearchEntity
 import com.autotube.ai.data.prefs.SecureStore
 import com.autotube.ai.data.remote.AutomationRequestDto
 import com.autotube.ai.data.remote.HealthDto
 import com.autotube.ai.data.remote.JobDetailDto
 import com.autotube.ai.data.remote.NichePreviewDto
 import com.autotube.ai.data.remote.QuotaDto
-import com.autotube.ai.data.remote.ResearchDto
 import com.autotube.ai.data.remote.YouTubeStatusDto
 import com.autotube.ai.data.repo.AutoTubeRepository
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -52,8 +50,6 @@ class AppViewModelFactory(private val app: AutoTubeApp) : ViewModelProvider.Fact
                 DashboardViewModel(repo, store, app) as T
             modelClass.isAssignableFrom(CreateViewModel::class.java) ->
                 CreateViewModel(repo, store, app) as T
-            modelClass.isAssignableFrom(ResearchViewModel::class.java) ->
-                ResearchViewModel(repo, store) as T
             modelClass.isAssignableFrom(JobViewModel::class.java) ->
                 JobViewModel(repo, store) as T
             modelClass.isAssignableFrom(AnalyticsViewModel::class.java) ->
@@ -197,6 +193,23 @@ class CreateViewModel(
     private val _kidsPrompt = MutableStateFlow(false)
     val kidsPrompt: StateFlow<Boolean> = _kidsPrompt.asStateFlow()
 
+    /**
+     * Whether the backend pins every upload to private.
+     *
+     * Read here so the publish selector can say that scheduling will not take
+     * effect, rather than offering a choice the backend quietly ignores.
+     */
+    private val _forcePrivate = MutableStateFlow(false)
+    val forcePrivate: StateFlow<Boolean> = _forcePrivate.asStateFlow()
+
+    init {
+        if (store.isConfigured) {
+            viewModelScope.launch {
+                repo.health().onSuccess { _forcePrivate.value = it.forcePrivate }
+            }
+        }
+    }
+
     fun previewNiche(niche: String, audience: String, style: String, duration: Int) {
         if (niche.length < 2) return
         runTask<NichePreviewDto>({
@@ -230,33 +243,6 @@ class CreateViewModel(
     }
 
     fun resetStarted() { _started.value = false }
-}
-
-// --------------------------------------------------------------------------
-class ResearchViewModel(
-    private val repo: AutoTubeRepository,
-    val store: SecureStore,
-) : BaseViewModel() {
-
-    private val _niche = MutableStateFlow(store.defaultNiche)
-    val niche: StateFlow<String> = _niche.asStateFlow()
-
-    private val _result = MutableStateFlow<ResearchDto?>(null)
-    val result: StateFlow<ResearchDto?> = _result.asStateFlow()
-
-    val cached: StateFlow<List<ResearchEntity>> = repo.observeResearch(store.defaultNiche)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
-
-    fun setNiche(value: String) { _niche.value = value }
-
-    fun run(videoFormat: String = "SHORT") {
-        val target = _niche.value.trim()
-        if (target.length < 2) {
-            error("Enter a niche first.")
-            return
-        }
-        runTask<ResearchDto>({ _result.value = it }) { repo.research(target, videoFormat) }
-    }
 }
 
 // --------------------------------------------------------------------------

@@ -677,7 +677,14 @@ class Pipeline:
                     meta: VideoMetadata) -> dict[str, Any]:
         """Actually upload (or schedule). Also used by the approve flow."""
         job_dir = Path(job.dir)
-        schedule = request.frequency != "once" or bool(request.upload_time)
+        schedule = (request.publish_mode != "immediate"
+                    and (request.frequency != "once" or bool(request.upload_time)))
+        # force_private also suppresses SCHEDULING, not just the privacy field.
+        # A scheduled insert carries publishAt, and YouTube publishes on that
+        # timestamp by itself - so leaving the schedule in place would make the
+        # video public regardless of what privacyStatus said at upload.
+        if self.uploader.force_private:
+            schedule = False
         if schedule and request.upload_time:
             meta.publish_at = self.uploader.resolve_publish_at(
                 upload_time=request.upload_time, timezone=request.timezone,

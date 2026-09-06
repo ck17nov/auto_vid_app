@@ -114,6 +114,8 @@ class AutomationBody(BaseModel):
     timezone: str = Field(default="Asia/Kolkata", max_length=64)
     made_for_kids: bool = False
     keywords: list[str] = Field(default_factory=list, max_length=10)
+    # "immediate" uploads on approval; "scheduled" hands YouTube a publishAt.
+    publish_mode: Literal["scheduled", "immediate"] = "scheduled"
 
     @field_validator("upload_time")
     @classmethod
@@ -247,6 +249,9 @@ def health() -> dict[str, Any]:
         "ffmpeg": have_ffmpeg(),
         "dry_run": CFG.dry_run,
         "upload_enabled": bool(CFG.get("youtube.upload_enabled")),
+        # Reported so the app can say WHY a scheduled publish will not happen,
+        # instead of silently uploading everything as private.
+        "force_private": bool(CFG.get("youtube.force_private")),
         "approval_required": bool(CFG.get("automation.approval_required")),
         "llm_providers": [p.name for p in router.usable],
         "tts_providers": [p.name for p in build_providers(

@@ -16,6 +16,13 @@ timezone:
 youtube:
   upload_enabled: false          # master safety switch
   default_privacy: private       # private | unlisted | public
+  # Upload for real, but never make anything visible.
+  #
+  # Pins privacy to private AND drops publishAt, so nothing is scheduled and
+  # nothing self-publishes. This is the setting that makes dry_run: false safe
+  # to verify with: uploads happen, subscribers see nothing. Turn it off only
+  # when you actually intend to publish.
+  force_private: true
   default_category_id: "27"      # 27 = Education, 28 = Science & Technology
   # Default daily API quota for a new Google Cloud project.
   daily_quota_units: 10000

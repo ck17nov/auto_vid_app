@@ -185,8 +185,15 @@ class TestScheduling:
         assert parse_rfc3339(rfc3339(original)) == original
 
     def test_uploader_only_schedules_while_private(self, cfg):
-        """publishAt is ignored unless privacyStatus is private at insert."""
+        """publishAt is ignored unless privacyStatus is private at insert.
+
+        force_private is off here on purpose: this covers the scheduling path,
+        and the shipped config turns force_private ON, which deliberately
+        drops publishAt so that nothing can self-publish. See TestForcePrivate
+        in test_longform.py for that behaviour.
+        """
         from engine.youtube.upload import YouTubeUploader
+        cfg.set("youtube.force_private", False)
         uploader = YouTubeUploader(cfg)
         meta = VideoMetadata(title="t", description="d", privacy="public",
                              publish_at="2026-03-01T14:30:00Z")
@@ -196,6 +203,7 @@ class TestScheduling:
 
     def test_immediate_upload_keeps_requested_privacy(self, cfg):
         from engine.youtube.upload import YouTubeUploader
+        cfg.set("youtube.force_private", False)
         uploader = YouTubeUploader(cfg)
         meta = VideoMetadata(title="t", description="d", privacy="private")
         body = uploader.build_body(meta, schedule=False)

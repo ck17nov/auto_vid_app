@@ -96,6 +96,13 @@ def load_config(path: str | Path | None = None) -> Config:
     if "UPLOAD_ENABLED" in os.environ:
         cfg.set("youtube.upload_enabled",
                 os.environ["UPLOAD_ENABLED"].strip().lower() in _TRUE)
+    # The switch that keeps uploads invisible belongs with the other two: a
+    # deployment that turns uploading on needs to be able to turn this on in
+    # the same place, without editing a tracked file that the next git pull
+    # would overwrite.
+    if "FORCE_PRIVATE" in os.environ:
+        cfg.set("youtube.force_private",
+                os.environ["FORCE_PRIVATE"].strip().lower() in _TRUE)
     if "AUTOTUBE_WORKSPACE" in os.environ:
         cfg.set("app.workspace", os.environ["AUTOTUBE_WORKSPACE"])
     return cfg

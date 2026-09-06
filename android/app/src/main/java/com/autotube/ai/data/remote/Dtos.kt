@@ -18,6 +18,7 @@ data class HealthDto(
     val version: String = "",
     val ffmpeg: Boolean = false,
     @SerialName("dry_run") val dryRun: Boolean = true,
+    @SerialName("force_private") val forcePrivate: Boolean = false,
     @SerialName("upload_enabled") val uploadEnabled: Boolean = false,
     @SerialName("approval_required") val approvalRequired: Boolean = true,
     @SerialName("llm_providers") val llmProviders: List<String> = emptyList(),
@@ -43,6 +44,7 @@ data class AutomationRequestDto(
     val timezone: String = "Asia/Kolkata",
     @SerialName("made_for_kids") val madeForKids: Boolean = false,
     val keywords: List<String> = emptyList(),
+    @SerialName("publish_mode") val publishMode: String = "scheduled",
 )
 
 @Serializable

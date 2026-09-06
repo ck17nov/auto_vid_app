@@ -102,6 +102,7 @@ private val WEEKDAYS = listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 fun CreateAutomationScreen(onStarted: () -> Unit) {
     val vm: CreateViewModel = appViewModel()
     val preview by vm.preview.collectAsStateWithLifecycle()
+    val forcePrivate by vm.forcePrivate.collectAsStateWithLifecycle()
     val kidsPrompt by vm.kidsPrompt.collectAsStateWithLifecycle()
     val started by vm.started.collectAsStateWithLifecycle()
     val busy by vm.busy.collectAsStateWithLifecycle()
@@ -131,6 +132,10 @@ fun CreateAutomationScreen(onStarted: () -> Unit) {
     // Remembers which niche the kids question was already answered for, so it
     // is asked once per niche rather than on every preview refresh.
     var kidsAnsweredFor by rememberSaveable { mutableStateOf("") }
+    // "scheduled" keeps the previous behaviour; frequency and publish timing
+    // used to be the same setting, so a daily automation could not put each
+    // video up straight away.
+    var publishMode by rememberSaveable { mutableStateOf("scheduled") }
 
     // A niche whose name says "kids" needs no confirmation dialog.
     val nicheIsKids = niche.trim().lowercase() in KIDS_NICHES
@@ -359,7 +364,39 @@ fun CreateAutomationScreen(onStarted: () -> Unit) {
             }
         }
 
-        if (frequency != "once") {
+        // ---- publish mode ------------------------------------------------
+        SectionTitle("Publishing")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(
+                selected = publishMode == "immediate",
+                onClick = { publishMode = "immediate" },
+                label = { Text("Publish immediately") },
+            )
+            FilterChip(
+                selected = publishMode == "scheduled",
+                onClick = { publishMode = "scheduled" },
+                label = { Text("Schedule") },
+            )
+        }
+        Text(
+            when {
+                forcePrivate ->
+                    "The backend is set to force private, so every upload stays " +
+                        "private and nothing is scheduled - publishing has no " +
+                        "effect until that is turned off. Useful for checking " +
+                        "that uploads work without subscribers seeing anything."
+                publishMode == "immediate" ->
+                    "Uploaded as soon as you approve the video."
+                else ->
+                    "Handed to YouTube with a scheduled publish time, so your " +
+                        "phone does not need to be online for it."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = if (forcePrivate) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        if (frequency != "once" && publishMode == "scheduled") {
             OutlinedTextField(
                 value = uploadTime,
                 onValueChange = { input ->
@@ -439,7 +476,9 @@ fun CreateAutomationScreen(onStarted: () -> Unit) {
                         mode = if (autoMode) "AUTO" else "APPROVAL",
                         frequency = frequency,
                         days = if (frequency == "days") selectedDays.sorted() else emptyList(),
-                        uploadTime = if (frequency == "once") "" else uploadTime,
+                        uploadTime = if (frequency == "once" ||
+                            publishMode == "immediate") "" else uploadTime,
+                        publishMode = publishMode,
                         timezone = vm.store.timezone,
                         madeForKids = madeForKids,
                     )

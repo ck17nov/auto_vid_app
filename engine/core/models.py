@@ -98,6 +98,12 @@ class AutomationRequest(JsonMixin):
     days: list[int] = field(default_factory=list)    # 0=Mon .. 6=Sun
     upload_time: str = "20:00"
     timezone: str = "Asia/Kolkata"
+    # "scheduled" hands YouTube a publishAt and lets it publish on the slot;
+    # "immediate" uploads as soon as the job is approved and sets no publishAt.
+    # Separated from `frequency` because the two were conflated: a daily
+    # automation always implied a scheduled publish, so there was no way to
+    # produce a video every day and put each one up straight away.
+    publish_mode: str = "scheduled"           # scheduled | immediate
     made_for_kids: bool = False
     keywords: list[str] = field(default_factory=list)
     id: str = field(default_factory=lambda: new_id("auto"))

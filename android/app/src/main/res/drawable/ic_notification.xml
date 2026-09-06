@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Status-bar icon: a top hat.
+
+     Android renders a notification's small icon as a mask - every non
+     transparent pixel becomes solid white - so this has to be a flat
+     silhouette. The launcher artwork was being used here, which on a modern
+     device showed as a white blob, and once that raster moved to mipmap/ it
+     stopped resolving at all. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFFFF">
+    <!-- Crown of the hat. -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M7.5,3h9v12h-9z" />
+    <!-- Brim. -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M3,15.5h18v2.5H3z" />
+    <!-- Wand, at an angle across the brim. -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M4.2,20.6l1.2,1.2l8,-2.4l-0.6,-1.6z" />
+</vector>

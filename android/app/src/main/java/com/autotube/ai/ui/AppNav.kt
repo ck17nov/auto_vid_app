@@ -8,7 +8,6 @@ import androidx.compose.material.icons.filled.AddCircle
 import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Troubleshoot
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -27,14 +26,12 @@ import com.autotube.ai.ui.screens.ContentScreen
 import com.autotube.ai.ui.screens.CreateAutomationScreen
 import com.autotube.ai.ui.screens.DashboardScreen
 import com.autotube.ai.ui.screens.PreviewScreen
-import com.autotube.ai.ui.screens.ResearchScreen
 import com.autotube.ai.ui.screens.SchedulerScreen
 import com.autotube.ai.ui.screens.SettingsScreen
 
 sealed class Dest(val route: String, val label: String, val icon: ImageVector?) {
     data object Dashboard : Dest("dashboard", "Dashboard", Icons.Filled.Dashboard)
     data object Create : Dest("create", "Create", Icons.Filled.AddCircle)
-    data object Research : Dest("research", "Research", Icons.Filled.Troubleshoot)
     data object Scheduler : Dest("scheduler", "Schedule", Icons.Filled.Schedule)
     data object Settings : Dest("settings", "Settings", Icons.Filled.Settings)
 
@@ -45,16 +42,20 @@ sealed class Dest(val route: String, val label: String, val icon: ImageVector?) 
     }
 }
 
-// Analytics removed on purpose. Every figure it showed comes from the YouTube
-// Analytics API, which spends the same daily quota the uploads need - and the
-// YouTube Studio app shows the same numbers for free. Not worth the quota.
+// Analytics and Research are both gone on purpose, for the same reason.
+//
+// Analytics showed figures that all come from the YouTube Analytics API, which
+// spends the same daily quota the uploads need, and the YouTube Studio app
+// shows them for free. Research browsed a niche manually - but Start
+// automation already researches the niche server-side, so the tab only spent
+// quota to show what the pipeline was going to fetch anyway.
 //
 // Settings IS in the bar. It used to be reachable only from a prompt on the
 // Dashboard, and that screen has no navigation of its own - so setting the
 // backend URL was a one-way trip with nothing but the system back gesture to
 // get out of it. It takes the slot Analytics vacated.
 private val bottomBar = listOf(
-    Dest.Dashboard, Dest.Create, Dest.Research, Dest.Scheduler, Dest.Settings,
+    Dest.Dashboard, Dest.Create, Dest.Scheduler, Dest.Settings,
 )
 
 @Composable
@@ -111,7 +112,6 @@ fun AutoTubeApp(navController: NavHostController = rememberNavController()) {
                         onStarted = { navController.navigate(Dest.Dashboard.route) },
                     )
                 }
-                composable(Dest.Research.route) { ResearchScreen() }
                 composable(Dest.Content.route) {
                     ContentScreen(
                         onOpenJob = { navController.navigate(Dest.Preview.path(it)) },

@@ -1999,3 +1999,62 @@ class TestNoNyquistLowpass:
         from engine.video.music import MOODS
         for name, spec in MOODS.items():
             assert spec["lowpass"] < 8000, name
+
+# ==========================================================================
+# force_private
+# ==========================================================================
+class TestForcePrivate:
+    """`privacyStatus: private` alone does not keep a video unlisted.
+
+    A scheduled upload is inserted as private WITH a publishAt, and YouTube
+    flips it to public on that timestamp by itself. The app defaults a new
+    automation to daily at 20:00, so "private plus a schedule" means "public
+    this evening" - which is exactly what must not happen while verifying that
+    uploading works at all.
+    """
+
+    def _uploader(self, force: bool):
+        from engine.youtube.upload import YouTubeUploader
+        cfg = load_config()
+        cfg.set("youtube.force_private", force)
+        return YouTubeUploader(cfg)
+
+    def _meta(self, **kw):
+        from engine.core.models import VideoMetadata
+        base = dict(title="t", description="d", tags=["a"], privacy="public",
+                    publish_at="2030-01-01T14:30:00Z", made_for_kids=False,
+                    language="hi")
+        base.update(kw)
+        return VideoMetadata(**base)
+
+    def test_privacy_is_pinned_to_private(self):
+        body = self._uploader(True).build_body(self._meta(), schedule=True)
+        assert body["status"]["privacyStatus"] == "private"
+
+    def test_publish_at_is_dropped_entirely(self):
+        """The field must be ABSENT, not merely set to something harmless."""
+        body = self._uploader(True).build_body(self._meta(), schedule=True)
+        assert "publishAt" not in body["status"]
+
+    def test_an_explicitly_public_request_is_still_overridden(self):
+        body = self._uploader(True).build_body(
+            self._meta(privacy="public", publish_at=None), schedule=False)
+        assert body["status"]["privacyStatus"] == "private"
+
+    def test_the_snippet_survives_the_early_return(self):
+        """The guard returns early - it must not drop the metadata."""
+        body = self._uploader(True).build_body(
+            self._meta(title="hello"), schedule=True)
+        assert body["snippet"]["title"] == "hello"
+        assert body["snippet"]["defaultLanguage"] == "hi"
+
+    def test_with_the_flag_off_scheduling_still_works(self):
+        """This is a switch, not a rewrite of the publishing behaviour."""
+        body = self._uploader(False).build_body(self._meta(), schedule=True)
+        assert body["status"]["publishAt"] == "2030-01-01T14:30:00Z"
+        assert body["status"]["privacyStatus"] == "private"
+
+    def test_the_shipped_config_has_it_on(self):
+        """dry_run is off, so this is the only thing keeping videos unlisted."""
+        cfg = load_config()
+        assert cfg.get("youtube.force_private") is True

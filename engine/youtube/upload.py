@@ -73,6 +73,22 @@ class YouTubeUploader:
         return rfc3339(local_slot_to_utc(upload_time, tz, days=days or None))
 
     # ------------------------------------------------------------------
+    @property
+    def force_private(self) -> bool:
+        """Never publish, never schedule - upload and stop at private.
+
+        `privacyStatus: private` on its own is NOT enough to keep a video off
+        subscribers' feeds. A scheduled upload is inserted as private WITH a
+        `publishAt`, and YouTube then flips it to public at that timestamp with
+        no further request from us. Since the app defaults a new automation to
+        daily at 20:00, "private" plus a schedule means "public this evening".
+
+        With this on, `publishAt` is dropped and privacy is pinned to private,
+        so uploading can be verified end to end without anything becoming
+        visible.
+        """
+        return bool(self.cfg.get("youtube.force_private", False))
+
     def build_body(self, meta: VideoMetadata, *,
                    schedule: bool) -> dict[str, Any]:
         status: dict[str, Any] = {
@@ -81,12 +97,20 @@ class YouTubeUploader:
             "embeddable": True,
             "license": "youtube",
         }
+        if self.force_private:
+            # Deliberately last word on privacy: no publishAt, no public.
+            status["privacyStatus"] = "private"
+            status.pop("publishAt", None)
+            return {"snippet": self._snippet(meta), "status": status}
         if schedule and meta.publish_at:
             # publishAt is only honoured while the video is private.
             status["privacyStatus"] = "private"
             status["publishAt"] = meta.publish_at
 
-        snippet: dict[str, Any] = {
+        return {"snippet": self._snippet(meta), "status": status}
+
+    def _snippet(self, meta: VideoMetadata) -> dict[str, Any]:
+        return {
             "title": meta.title[:100],
             "description": meta.description[:5000],
             "tags": meta.tags[:15],
@@ -94,7 +118,6 @@ class YouTubeUploader:
             "defaultLanguage": meta.language or "en",
             "defaultAudioLanguage": meta.language or "en",
         }
-        return {"snippet": snippet, "status": status}
 
     # ------------------------------------------------------------------
     def upload(self, *, video: Path, meta: VideoMetadata,
