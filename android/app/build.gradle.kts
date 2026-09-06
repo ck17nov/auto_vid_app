@@ -26,21 +26,23 @@ android {
         // OAuth redirect scheme. A Google *Android* OAuth client is validated
         // by package name plus signing certificate, and AppAuth's redirect is
         // "<package>:/oauth2redirect" - so the scheme MUST equal the real
-        // applicationId of the build being installed. It is set per build type
-        // below rather than once here, because the debug build carries an
-        // applicationIdSuffix: hard-coding "com.autotube.ai" made the debug
-        // APK request a redirect that did not match its own package, and
-        // Google rejects that.
+        // applicationId of the build being installed.
+        //
+        // Set once, here, for every build type. There is deliberately NO
+        // applicationIdSuffix on debug: a suffix means the OAuth client in
+        // Google Cloud has to be registered against "com.autotube.ai.debug",
+        // and registering the obvious "com.autotube.ai" instead makes Google
+        // reject the authorization request with a bare "invalid request".
+        // Side-by-side debug and release installs are not worth an OAuth
+        // setup that silently breaks when you switch build type.
+        manifestPlaceholders["appAuthRedirectScheme"] = "com.autotube.ai"
     }
 
     buildTypes {
         debug {
             isMinifyEnabled = false
-            applicationIdSuffix = ".debug"
-            manifestPlaceholders["appAuthRedirectScheme"] = "com.autotube.ai.debug"
         }
         release {
-            manifestPlaceholders["appAuthRedirectScheme"] = "com.autotube.ai"
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -113,6 +115,9 @@ dependencies {
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
+    // Drives the transport-retry test against a real socket. Test-only: not
+    // packaged into the APK.
+    testImplementation(libs.okhttp.mockwebserver)
     androidTestImplementation(libs.androidx.test.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(platform(libs.androidx.compose.bom))

@@ -31,6 +31,17 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.autotube.ai.ui.theme.statusColor
 import kotlin.math.roundToInt
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.MenuAnchorType
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 
 @Composable
 fun SectionTitle(text: String, modifier: Modifier = Modifier) {
@@ -239,4 +250,89 @@ fun compactNumber(value: Long): String = when {
 fun formatSeconds(seconds: Double): String {
     val total = seconds.roundToInt()
     return if (total >= 60) "${total / 60}m ${total % 60}s" else "${total}s"
+}
+
+/**
+ * Labelled dropdown with an "Other…" escape hatch.
+ *
+ * Replaces the wall of FilterChips that every choice used to be rendered as.
+ * With a dozen niches and eight languages the chips wrapped over several rows
+ * and pushed the rest of the form off screen, and on a phone they are harder
+ * to hit accurately than one list.
+ *
+ * When [allowOther] is set, choosing "Other…" reveals a free-text field, so an
+ * unusual niche is still possible without listing every option. A value that
+ * is not in [options] is treated as an "other" value and shown in the field,
+ * which is what makes the control round-trip a saved setting correctly.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun LabeledDropdown(
+    label: String,
+    value: String,
+    options: List<String>,
+    onValueChange: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    allowOther: Boolean = false,
+    otherLabel: String = "Other…",
+    display: (String) -> String = { it },
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val isOther = allowOther && value.isNotBlank() && value !in options
+    var customText by rememberSaveable(label) { mutableStateOf(if (isOther) value else "") }
+    val shown = when {
+        isOther -> otherLabel
+        value.isBlank() -> ""
+        else -> display(value)
+    }
+
+    Column(modifier = modifier.fillMaxWidth()) {
+        ExposedDropdownMenuBox(
+            expanded = expanded,
+            onExpandedChange = { expanded = !expanded },
+        ) {
+            OutlinedTextField(
+                value = shown,
+                onValueChange = {},
+                readOnly = true,
+                label = { Text(label) },
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .menuAnchor(MenuAnchorType.PrimaryNotEditable),
+            )
+            ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                options.forEach { option ->
+                    DropdownMenuItem(
+                        text = { Text(display(option)) },
+                        onClick = {
+                            expanded = false
+                            onValueChange(option)
+                        },
+                    )
+                }
+                if (allowOther) {
+                    DropdownMenuItem(
+                        text = { Text(otherLabel) },
+                        onClick = {
+                            expanded = false
+                            // Keep whatever was typed before, so reopening the
+                            // menu and picking Other again does not wipe it.
+                            onValueChange(customText.ifBlank { " " })
+                        },
+                    )
+                }
+            }
+        }
+        if (isOther) {
+            Spacer(Modifier.height(6.dp))
+            OutlinedTextField(
+                value = customText,
+                onValueChange = { customText = it; onValueChange(it) },
+                label = { Text("$label (custom)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+    }
 }

@@ -1,6 +1,7 @@
 package com.autotube.ai.workers
 
 import android.app.NotificationChannel
+import android.app.PendingIntent
 import android.app.NotificationManager
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -20,6 +21,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.autotube.ai.AutoTubeApp
+import com.autotube.ai.MainActivity
 import com.autotube.ai.R
 import com.autotube.ai.data.remote.AutomationRequestDto
 import java.util.concurrent.TimeUnit
@@ -70,7 +72,15 @@ class SyncWorker(appContext: Context, params: WorkerParameters) :
             jobs.countByStatusOnce(STATUS_FAILED)
         }.getOrDefault(0)
 
-        if (approvals > 0) {
+        // Only notify when the count CHANGES. It previously fired on every
+        // 15-minute sync for anything sitting in AWAITING_APPROVAL, so a job
+        // the user had already seen - or one created during testing before
+        // they ever opened the app - produced a fresh "video ready" alert
+        // every quarter of an hour.
+        val lastSeen = app.secureStore.lastApprovalCount
+        app.secureStore.lastApprovalCount = approvals
+
+        if (approvals > 0 && approvals > lastSeen) {
             postNotification(
                 app,
                 title = "Video ready for approval",
@@ -144,23 +154,6 @@ class AutomationWorker(appContext: Context, params: WorkerParameters) :
     }
 }
 
-/** Collects own-channel analytics daily so the learning loop has data. */
-class AnalyticsWorker(appContext: Context, params: WorkerParameters) :
-    CoroutineWorker(appContext, params) {
-
-    override suspend fun doWork(): Result {
-        val app = applicationContext as AutoTubeApp
-        if (!app.secureStore.isConfigured) return Result.success()
-        val result = app.repository.refreshAnalytics(collect = true)
-        return if (result.isSuccess || runAttemptCount >= 3) Result.success()
-        else Result.retry()
-    }
-
-    companion object {
-        const val NAME = "autotube-analytics"
-    }
-}
-
 // --------------------------------------------------------------------------
 object WorkScheduler {
 
@@ -179,20 +172,29 @@ object WorkScheduler {
             SyncWorker.NAME, ExistingPeriodicWorkPolicy.KEEP, request)
     }
 
+    /**
+     * Cancel periodic work whose worker class this build no longer contains.
+     *
+     * Enqueued periodic work lives in WorkManager's own database, not in the
+     * APK, so it survives an upgrade that deletes the worker. WorkManager then
+     * wakes up every 12 hours, fails to instantiate the missing class, logs
+     * the failure and retries - forever. The analytics collector was removed
+     * because own-channel numbers are already in YouTube Studio and were not
+     * worth the API quota; this clears its leftover schedule from installs
+     * that had it.
+     */
+    fun cancelRetiredWork(context: Context) {
+        WorkManager.getInstance(context).cancelUniqueWork(RETIRED_ANALYTICS_WORK)
+    }
+
+    private const val RETIRED_ANALYTICS_WORK = "autotube-analytics"
+
     fun syncNow(context: Context) {
         val request = OneTimeWorkRequestBuilder<SyncWorker>()
             .setConstraints(networkConstraints)
             .build()
         WorkManager.getInstance(context).enqueueUniqueWork(
             "${SyncWorker.NAME}-now", ExistingWorkPolicy.REPLACE, request)
-    }
-
-    fun scheduleAnalytics(context: Context) {
-        val request = PeriodicWorkRequestBuilder<AnalyticsWorker>(12, TimeUnit.HOURS)
-            .setConstraints(networkConstraints)
-            .build()
-        WorkManager.getInstance(context).enqueueUniquePeriodicWork(
-            AnalyticsWorker.NAME, ExistingPeriodicWorkPolicy.KEEP, request)
     }
 
     /**
@@ -239,7 +241,6 @@ class BootReceiver : BroadcastReceiver() {
             // Periodic work survives reboot on its own, but re-arming is cheap
             // and covers the case where the app was updated (spec section 22).
             WorkScheduler.scheduleSync(context)
-            WorkScheduler.scheduleAnalytics(context)
         }
     }
 }
@@ -271,10 +272,23 @@ fun postNotification(context: Context, title: String, body: String, id: Int) {
         if (!granted) return
     }
     ensureNotificationChannel(context)
+
+    // Without a content intent, tapping the notification does NOTHING - it
+    // just sits there. That was the behaviour: an alert saying a video was
+    // ready, which could not take you to it.
+    val launch = Intent(context, MainActivity::class.java).apply {
+        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+    }
+    val pending = PendingIntent.getActivity(
+        context, id, launch,
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
+
     val notification = NotificationCompat.Builder(context, CHANNEL_ID)
         .setSmallIcon(R.drawable.ic_launcher_foreground)
         .setContentTitle(title)
         .setContentText(body)
+        .setContentIntent(pending)
         .setAutoCancel(true)
         .setPriority(NotificationCompat.PRIORITY_DEFAULT)
         .build()

@@ -4,10 +4,14 @@ import com.autotube.ai.BuildConfig
 import com.autotube.ai.data.prefs.SecureStore
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Interceptor
+import okhttp3.Response
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
 import retrofit2.converter.kotlinx.serialization.asConverterFactory
+import java.io.IOException
+import java.net.SocketTimeoutException
 import java.util.concurrent.TimeUnit
 
 /**
@@ -76,6 +80,7 @@ class ApiClient(private val store: SecureStore) {
                 }
                 chain.proceed(builder.build())
             }
+            .addInterceptor(RetryIdempotent())
             .addInterceptor(logging)
             .build()
 
@@ -95,4 +100,48 @@ class ApiClient(private val store: SecureStore) {
 
     val apiKeyHeader: Pair<String, String>?
         get() = store.apiKey.takeIf { it.isNotBlank() }?.let { "X-API-Key" to it }
+}
+
+/**
+ * Retries idempotent requests once or twice when the transport fails.
+ *
+ * Every transport failure reaches the repository as a bare IOException, which
+ * the UI can only report as "cannot reach the backend" - and that was showing
+ * up on screens whose first request landed on a pooled connection the server
+ * had already closed. Caddy speaks HTTP/2 and recycles idle connections, so
+ * the second screen to make a call inherits a dead stream and fails with
+ * StreamResetException or ConnectionShutdownException while the endpoint
+ * itself is perfectly healthy. OkHttp's own retryOnConnectionFailure does not
+ * cover a stream that was reset after the request was written.
+ *
+ * Only GET and HEAD are retried. Replaying a POST could queue a second
+ * automation, and a duplicate render is worse than an error message.
+ */
+internal class RetryIdempotent(private val maxAttempts: Int = 3) : Interceptor {
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        val idempotent = request.method == "GET" || request.method == "HEAD"
+        val attempts = if (idempotent) maxAttempts else 1
+        var last: IOException? = null
+        for (attempt in 1..attempts) {
+            try {
+                return chain.proceed(request)
+            } catch (e: IOException) {
+                last = e
+                // A timeout means the server is thinking, not that the
+                // connection is stale; hammering it again just multiplies the
+                // wait the user sits through.
+                if (e is SocketTimeoutException) throw e
+                if (attempt < attempts) {
+                    try {
+                        Thread.sleep(150L * attempt)
+                    } catch (interrupted: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        throw e
+                    }
+                }
+            }
+        }
+        throw last ?: IOException("request failed with no exception")
+    }
 }

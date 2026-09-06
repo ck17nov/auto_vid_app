@@ -1,6 +1,7 @@
 package com.autotube.ai
 
 import android.app.Application
+import android.util.Log
 import androidx.room.Room
 import com.autotube.ai.data.local.AppDatabase
 import com.autotube.ai.data.prefs.SecureStore
@@ -36,9 +37,19 @@ class AutoTubeApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        ensureNotificationChannel(this)
-        // Safe to call every launch: both use unique-work policies.
-        WorkScheduler.scheduleSync(this)
-        WorkScheduler.scheduleAnalytics(this)
+        // Nothing here may take the process down. Launch-time setup is
+        // convenience - notification channels, periodic sync - and none of it
+        // is worth a crash the user can only escape by clearing app data.
+        runCatching { ensureNotificationChannel(this) }
+            .onFailure { Log.w(TAG, "notification channel: ${it.javaClass.simpleName}") }
+        // Safe to call every launch: uses a unique-work policy.
+        runCatching { WorkScheduler.scheduleSync(this) }
+            .onFailure { Log.w(TAG, "sync schedule: ${it.javaClass.simpleName}") }
+        runCatching { WorkScheduler.cancelRetiredWork(this) }
+            .onFailure { Log.w(TAG, "retired work: ${it.javaClass.simpleName}") }
+    }
+
+    private companion object {
+        const val TAG = "AutoTubeApp"
     }
 }

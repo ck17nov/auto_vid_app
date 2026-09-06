@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddCircle
 import androidx.compose.material.icons.filled.Dashboard
-import androidx.compose.material.icons.filled.Insights
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Troubleshoot
@@ -24,7 +23,6 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
-import com.autotube.ai.ui.screens.AnalyticsScreen
 import com.autotube.ai.ui.screens.ContentScreen
 import com.autotube.ai.ui.screens.CreateAutomationScreen
 import com.autotube.ai.ui.screens.DashboardScreen
@@ -38,7 +36,6 @@ sealed class Dest(val route: String, val label: String, val icon: ImageVector?) 
     data object Create : Dest("create", "Create", Icons.Filled.AddCircle)
     data object Research : Dest("research", "Research", Icons.Filled.Troubleshoot)
     data object Scheduler : Dest("scheduler", "Schedule", Icons.Filled.Schedule)
-    data object Analytics : Dest("analytics", "Analytics", Icons.Filled.Insights)
     data object Settings : Dest("settings", "Settings", Icons.Filled.Settings)
 
     // Detail destinations are not in the bottom bar.
@@ -48,8 +45,11 @@ sealed class Dest(val route: String, val label: String, val icon: ImageVector?) 
     }
 }
 
+// Analytics removed on purpose. Every figure it showed comes from the YouTube
+// Analytics API, which spends the same daily quota the uploads need - and the
+// YouTube Studio app shows the same numbers for free. Not worth the quota.
 private val bottomBar = listOf(
-    Dest.Dashboard, Dest.Create, Dest.Research, Dest.Scheduler, Dest.Analytics,
+    Dest.Dashboard, Dest.Create, Dest.Research, Dest.Scheduler,
 )
 
 @Composable
@@ -117,7 +117,6 @@ fun AutoTubeApp(navController: NavHostController = rememberNavController()) {
                         onOpenJob = { navController.navigate(Dest.Preview.path(it)) },
                     )
                 }
-                composable(Dest.Analytics.route) { AnalyticsScreen() }
                 composable(Dest.Settings.route) { SettingsScreen() }
                 composable(Dest.Preview.route) { entry ->
                     val jobId = entry.arguments?.getString("jobId").orEmpty()

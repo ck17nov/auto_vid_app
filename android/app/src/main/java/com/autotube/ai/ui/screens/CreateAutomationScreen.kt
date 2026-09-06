@@ -43,33 +43,56 @@ import com.autotube.ai.ui.components.SectionTitle
 import com.autotube.ai.ui.vm.CreateViewModel
 import com.autotube.ai.ui.vm.appViewModel
 import kotlin.math.roundToInt
+import androidx.compose.runtime.saveable.rememberSaveable
+import com.autotube.ai.ui.components.LabeledDropdown
+import kotlinx.coroutines.delay
 
-private val NICHE_SUGGESTIONS = listOf(
+// Common niches. "Other…" in the dropdown opens a free-text field, so this
+// does not need to be exhaustive - it only needs to cover the usual cases
+// without making the user type.
+val NICHE_OPTIONS = listOf(
     "science", "space", "technology", "AI", "history", "interesting facts",
-    "psychology", "finance basics", "productivity", "programming", "cars",
-    "travel", "gaming", "kids bedtime stories", "health myths",
+    "psychology", "finance basics", "productivity", "programming",
+    "nature", "animals", "geography", "health myths", "food science",
+    "ancient engineering", "true stories", "kids bedtime stories",
+    "kids alphabet learning", "kids numbers and counting",
 )
 
-private val LANGUAGES = listOf(
-    "en" to "English",
-    "en-IN" to "Indian English",
+// Niches that are child-directed by definition. Picking one of these sets the
+// Made for Kids flag without prompting: being asked to confirm on every
+// keystroke, for a niche literally named "kids", is noise rather than consent.
+val KIDS_NICHES = setOf(
+    "kids bedtime stories", "kids alphabet learning", "kids numbers and counting",
+)
+
+val LANGUAGES = listOf(
     "hi" to "Hindi",
+    "en-IN" to "Indian English",
+    "en" to "English",
     "ta" to "Tamil",
     "te" to "Telugu",
     "bn" to "Bengali",
     "mr" to "Marathi",
-    "es" to "Spanish",
+    "gu" to "Gujarati",
 )
 
-private val STYLES = listOf(
+val STYLES = listOf(
     "fast-paced, curiosity-driven",
     "calm and cinematic",
     "storytelling",
     "educational and clear",
     "high-energy entertainment",
+    "gentle and simple (for young children)",
 )
 
-private val AUDIENCES = listOf("13-17", "18-24", "18-35", "25-44", "35+", "all ages")
+// Under-13 bands were missing entirely, which made it impossible to describe
+// the audience for children's content - the one category where age actually
+// changes the safety profile and the vocabulary.
+val AUDIENCES = listOf(
+    "2-4", "5-7", "8-12", "13-17", "18-24", "18-35", "25-44", "35+", "all ages",
+)
+
+val FREQUENCIES = listOf("once", "daily", "weekly", "days")
 private val WEEKDAYS = listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -82,24 +105,52 @@ fun CreateAutomationScreen(onStarted: () -> Unit) {
     val busy by vm.busy.collectAsStateWithLifecycle()
     val message by vm.message.collectAsStateWithLifecycle()
 
-    var niche by remember { mutableStateOf(vm.store.defaultNiche) }
-    var audience by remember { mutableStateOf("18-35") }
-    var language by remember { mutableStateOf(vm.store.defaultLanguage) }
-    var isShort by remember { mutableStateOf(true) }
-    var lengthSeconds by remember { mutableIntStateOf(45) }
-    var style by remember { mutableStateOf(STYLES.first()) }
-    var frequency by remember { mutableStateOf("daily") }
-    var selectedDays by remember { mutableStateOf(setOf(0, 1, 2, 3, 4)) }
-    var uploadTime by remember { mutableStateOf("20:00") }
-    var count by remember { mutableIntStateOf(1) }
-    var autoMode by remember { mutableStateOf(vm.store.autoApprove) }
-    var madeForKids by remember { mutableStateOf(false) }
+    // rememberSaveable, NOT remember.
+    //
+    // The bottom bar navigates with saveState/restoreState, which restores the
+    // NavBackStackEntry - but plain `remember` is not part of that. Every
+    // field reset to its default the moment you switched tab and came back,
+    // silently discarding whatever had been filled in.
+    var niche by rememberSaveable { mutableStateOf(vm.store.defaultNiche) }
+    var audience by rememberSaveable { mutableStateOf("18-35") }
+    var language by rememberSaveable { mutableStateOf(vm.store.defaultLanguage) }
+    var isShort by rememberSaveable { mutableStateOf(true) }
+    var lengthSeconds by rememberSaveable { mutableIntStateOf(45) }
+    var style by rememberSaveable { mutableStateOf(STYLES.first()) }
+    var frequency by rememberSaveable { mutableStateOf("daily") }
+    // A List, not a Set: ArrayList is saveable out of the box, whereas a Set
+    // needs a custom Saver whose types Kotlin cannot infer through the `by`
+    // delegate. Order is irrelevant here - it is sorted before being sent.
+    var selectedDays by rememberSaveable { mutableStateOf(listOf(0, 1, 2, 3, 4)) }
+    var uploadTime by rememberSaveable { mutableStateOf("20:00") }
+    var count by rememberSaveable { mutableIntStateOf(1) }
+    var autoMode by rememberSaveable { mutableStateOf(vm.store.autoApprove) }
+    var madeForKids by rememberSaveable { mutableStateOf(false) }
+    // Remembers which niche the kids question was already answered for, so it
+    // is asked once per niche rather than on every preview refresh.
+    var kidsAnsweredFor by rememberSaveable { mutableStateOf("") }
 
-    // Ask the backend how it will interpret the niche (and whether it looks
-    // child-directed) as the user types.
+    // A niche whose name says "kids" needs no confirmation dialog.
+    val nicheIsKids = niche.trim().lowercase() in KIDS_NICHES
+    LaunchedEffect(nicheIsKids) {
+        if (nicheIsKids) {
+            madeForKids = true
+            audience = if (audience in listOf("2-4", "5-7", "8-12")) audience else "5-7"
+            vm.dismissKidsPrompt()
+        }
+    }
+
+    // Ask the backend how it will interpret the niche. DEBOUNCED so that
+    // typing a custom topic fires one request instead of one per keystroke.
+    //
+    // (The rate limiter is NOT why this screen used to report "cannot reach
+    // backend": /niche/preview answers 200 in under a second and survives a
+    // 10-call burst. The transport was the problem - see RetryIdempotent in
+    // ApiClient.)
     LaunchedEffect(niche, audience, style, lengthSeconds) {
-        if (niche.length >= 3) {
-            vm.previewNiche(niche, audience, style, lengthSeconds)
+        if (niche.trim().length >= 3) {
+            delay(600)
+            vm.previewNiche(niche.trim(), audience, style, lengthSeconds)
         }
     }
 
@@ -130,20 +181,21 @@ fun CreateAutomationScreen(onStarted: () -> Unit) {
 
         // ---- niche ------------------------------------------------------
         SectionTitle("Niche")
-        OutlinedTextField(
+        LabeledDropdown(
+            label = "Topic",
             value = niche,
+            options = NICHE_OPTIONS,
+            allowOther = true,
+            otherLabel = "Other topic…",
             onValueChange = { niche = it },
-            label = { Text("Any topic") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
         )
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            NICHE_SUGGESTIONS.forEach { suggestion ->
-                AssistChip(
-                    onClick = { niche = suggestion },
-                    label = { Text(suggestion, style = MaterialTheme.typography.labelSmall) },
-                )
-            }
+        if (nicheIsKids) {
+            Text(
+                "Child-directed niche: Made for Kids is set automatically and " +
+                    "the stricter safety profile applies.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
         }
 
         // How the backend interpreted it - transparency about what will be made.
@@ -189,27 +241,20 @@ fun CreateAutomationScreen(onStarted: () -> Unit) {
         }
 
         // ---- audience + language ---------------------------------------
-        SectionTitle("Audience")
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            AUDIENCES.forEach { option ->
-                FilterChip(
-                    selected = audience == option,
-                    onClick = { audience = option },
-                    label = { Text(option) },
-                )
-            }
-        }
+        LabeledDropdown(
+            label = "Audience age",
+            value = audience,
+            options = AUDIENCES,
+            onValueChange = { audience = it },
+        )
 
-        SectionTitle("Language")
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            LANGUAGES.forEach { (code, label) ->
-                FilterChip(
-                    selected = language == code,
-                    onClick = { language = code },
-                    label = { Text(label) },
-                )
-            }
-        }
+        LabeledDropdown(
+            label = "Language",
+            value = language,
+            options = LANGUAGES.map { it.first },
+            display = { code -> LANGUAGES.firstOrNull { it.first == code }?.second ?: code },
+            onValueChange = { language = it },
+        )
 
         // ---- format + length -------------------------------------------
         SectionTitle("Format")
@@ -269,33 +314,30 @@ fun CreateAutomationScreen(onStarted: () -> Unit) {
             )
         }
 
-        SectionTitle("Style")
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            STYLES.forEach { option ->
-                FilterChip(
-                    selected = style == option,
-                    onClick = { style = option },
-                    label = { Text(option, style = MaterialTheme.typography.labelSmall) },
-                )
-            }
-        }
+        LabeledDropdown(
+            label = "Style",
+            value = style,
+            options = STYLES,
+            allowOther = true,
+            otherLabel = "Other style…",
+            onValueChange = { style = it },
+        )
 
         // ---- schedule ---------------------------------------------------
-        SectionTitle("Upload frequency")
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            listOf(
-                "once" to "Just once",
-                "daily" to "Daily",
-                "weekly" to "Weekly",
-                "days" to "Specific days",
-            ).forEach { (value, label) ->
-                FilterChip(
-                    selected = frequency == value,
-                    onClick = { frequency = value },
-                    label = { Text(label) },
-                )
-            }
-        }
+        LabeledDropdown(
+            label = "Upload frequency",
+            value = frequency,
+            options = FREQUENCIES,
+            display = {
+                when (it) {
+                    "once" -> "Just once"
+                    "daily" -> "Daily"
+                    "weekly" -> "Weekly"
+                    else -> "Specific days"
+                }
+            },
+            onValueChange = { frequency = it },
+        )
 
         if (frequency == "days") {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -307,7 +349,7 @@ fun CreateAutomationScreen(onStarted: () -> Unit) {
                                 selectedDays - index
                             } else {
                                 selectedDays + index
-                            }
+                            }.distinct()
                         },
                         label = { Text(day) },
                     )
@@ -410,8 +452,15 @@ fun CreateAutomationScreen(onStarted: () -> Unit) {
         Spacer(Modifier.height(32.dp))
     }
 
-    // Kids confirmation (spec section 9): explicit, blocking, before anything runs.
-    if (kidsPrompt && !madeForKids) {
+    // Kids confirmation (spec section 9): explicit, blocking, before anything
+    // runs - but asked ONCE PER NICHE, not on every preview refresh. The
+    // preview is re-requested whenever the niche, audience, style or length
+    // changes, and the prompt was re-armed from its result each time, so the
+    // dialog reappeared constantly. A consent dialog you have to dismiss
+    // repeatedly stops being consent and becomes an obstacle.
+    val askKids = kidsPrompt && !madeForKids && !nicheIsKids &&
+        kidsAnsweredFor != niche.trim().lowercase()
+    if (askKids) {
         AlertDialog(
             onDismissRequest = { vm.dismissKidsPrompt() },
             title = { Text("Is this content for children?") },
@@ -427,11 +476,15 @@ fun CreateAutomationScreen(onStarted: () -> Unit) {
             confirmButton = {
                 TextButton(onClick = {
                     madeForKids = true
+                    kidsAnsweredFor = niche.trim().lowercase()
                     vm.dismissKidsPrompt()
                 }) { Text("Yes, made for kids") }
             },
             dismissButton = {
-                TextButton(onClick = { vm.dismissKidsPrompt() }) {
+                TextButton(onClick = {
+                    kidsAnsweredFor = niche.trim().lowercase()
+                    vm.dismissKidsPrompt()
+                }) {
                     Text("No, general audience")
                 }
             },

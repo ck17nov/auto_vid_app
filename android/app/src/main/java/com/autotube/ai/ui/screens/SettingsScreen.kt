@@ -22,6 +22,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -32,7 +33,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -44,11 +47,10 @@ import com.autotube.ai.ui.components.SectionTitle
 import com.autotube.ai.ui.vm.SettingsViewModel
 import com.autotube.ai.ui.vm.appViewModel
 import kotlin.math.roundToInt
+import com.autotube.ai.ui.components.LabeledDropdown
 
-private val TIMEZONES = listOf(
-    "Asia/Kolkata", "UTC", "America/New_York", "America/Los_Angeles",
-    "Europe/London", "Asia/Dubai", "Asia/Singapore", "Australia/Sydney",
-)
+// One zone on purpose - see the note where it is displayed.
+private val TIMEZONES = listOf("Asia/Kolkata")
 
 @Composable
 fun SettingsScreen() {
@@ -63,12 +65,15 @@ fun SettingsScreen() {
     var backendUrl by remember { mutableStateOf(store.backendUrl) }
     var apiKey by remember { mutableStateOf(store.apiKey) }
     var oauthClientId by remember { mutableStateOf(store.oauthClientId) }
+    var ytAccount by remember { mutableStateOf(store.youtubeAccountEmail) }
     var defaultNiche by remember { mutableStateOf(store.defaultNiche) }
     var timezone by remember { mutableStateOf(store.timezone) }
+    var defaultLanguage by remember { mutableStateOf(store.defaultLanguage) }
     var threshold by remember { mutableIntStateOf(store.qualityThreshold) }
     var autoApprove by remember { mutableStateOf(store.autoApprove) }
 
     val authManager = remember { YouTubeAuthManager(context, store) }
+    val signingSha1 = remember { YouTubeAuthManager.signingSha1(context) }
     DisposableEffect(Unit) { onDispose { authManager.dispose() } }
 
     val authLauncher = rememberLauncherForActivityResult(
@@ -113,6 +118,15 @@ fun SettingsScreen() {
         if (busy) LoadingRow()
 
         // ---- backend ----------------------------------------------------
+        if (store.inMemoryOnly) {
+            InfoBanner(
+                text = "Secure storage could not be opened, so the backend key " +
+                    "and YouTube connection will not be remembered after you " +
+                    "close the app. Re-enter them, or reinstall if it persists.",
+                tone = BannerTone.Error,
+            )
+        }
+
         SectionTitle("Backend")
         OutlinedTextField(
             value = backendUrl,
@@ -194,6 +208,51 @@ fun SettingsScreen() {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        OutlinedTextField(
+            value = ytAccount,
+            onValueChange = { ytAccount = it; store.youtubeAccountEmail = it },
+            label = { Text("Google account for the channel (optional)") },
+            placeholder = { Text("name@gmail.com") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Text(
+            "Sign-in opens in Chrome, which otherwise uses whichever Google " +
+                "account is its default - not necessarily the one that owns " +
+                "the channel. Filling this in pre-selects the right account. " +
+                "The account chooser is always shown, so you can correct it there.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        // The three values Google Cloud asks for, read off this build.
+        //
+        // Google answers a registration mismatch with an "invalid request"
+        // page that names no field, so guessing any of these costs a full
+        // round trip through the console. Showing them - and letting the user
+        // copy them - is the difference between a two-minute setup and an
+        // afternoon.
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant
+            ),
+            shape = RoundedCornerShape(12.dp),
+        ) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                SectionTitle("Register these in Google Cloud")
+                CopyableValue("Package name", com.autotube.ai.BuildConfig.APPLICATION_ID)
+                CopyableValue("SHA-1 certificate fingerprint", signingSha1)
+                CopyableValue("Redirect URI", YouTubeAuthManager.redirectUri)
+                Text(
+                    "APIs & Services > Credentials > Create credentials > " +
+                        "OAuth client ID > Android. The package name and SHA-1 " +
+                        "must match exactly, and your Google account must be " +
+                        "listed under OAuth consent screen > Test users.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
                 onClick = {
@@ -248,37 +307,32 @@ fun SettingsScreen() {
 
         // ---- defaults ----------------------------------------------------
         SectionTitle("Defaults")
-        OutlinedTextField(
+        LabeledDropdown(
+            label = "Default niche",
             value = defaultNiche,
+            options = NICHE_OPTIONS,
+            allowOther = true,
+            otherLabel = "Other topic…",
             onValueChange = { defaultNiche = it; store.defaultNiche = it },
-            label = { Text("Default niche") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
         )
 
-        SectionTitle("Timezone: $timezone")
-        Column {
-            TIMEZONES.forEach { option ->
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Switch(
-                        checked = timezone == option,
-                        onCheckedChange = {
-                            if (it) { timezone = option; store.timezone = option }
-                        },
-                    )
-                    Text(
-                        option,
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(start = 10.dp),
-                    )
-                }
-            }
-        }
+        LabeledDropdown(
+            label = "Default language",
+            value = defaultLanguage,
+            options = LANGUAGES.map { it.first },
+            display = { code -> LANGUAGES.firstOrNull { it.first == code }?.second ?: code },
+            onValueChange = { defaultLanguage = it; store.defaultLanguage = it },
+        )
+
+        // Timezone is fixed to Asia/Kolkata. It only affects when a scheduled
+        // upload fires, and a list of switches for zones that will never be
+        // used was clutter on an already long screen. Change the constant if
+        // this ever needs to move.
+        Text(
+            "Timezone: $timezone",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
 
         SectionTitle("Minimum quality score to publish: $threshold/100")
         Slider(
@@ -347,6 +401,32 @@ private fun ServiceLine(label: String, ok: Boolean, detail: String) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+    }
+}
+
+/**
+ * A label with a selectable, copyable value. A 59-character SHA-1 cannot be
+ * transcribed by hand onto a laptop without an error, so it goes to the
+ * clipboard instead.
+ */
+@Composable
+private fun CopyableValue(label: String, value: String) {
+    val clipboard = LocalClipboardManager.current
+    Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                label,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(value, style = MaterialTheme.typography.bodyMedium)
+        }
+        TextButton(onClick = { clipboard.setText(AnnotatedString(value)) }) {
+            Text("Copy")
         }
     }
 }

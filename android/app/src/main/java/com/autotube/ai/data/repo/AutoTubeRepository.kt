@@ -254,7 +254,13 @@ class AutoTubeRepository(
             } catch (e: IOException) {
                 Result.failure(
                     RepositoryException(
-                        "Cannot reach the backend at ${store.backendUrl.ifBlank { "(not set)" }}.",
+                        // Include the cause. "Cannot reach the backend" alone
+                        // is indistinguishable between no network, DNS
+                        // failure, a rejected certificate and an empty URL -
+                        // and those need completely different fixes.
+                        "Cannot reach ${store.backendUrl.ifBlank { "(no URL set)" }} " +
+                            "- ${e.javaClass.simpleName}" +
+                            (e.message?.take(80)?.let { ": $it" } ?: ""),
                         e,
                     )
                 )
