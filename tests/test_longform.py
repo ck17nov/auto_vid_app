@@ -893,9 +893,17 @@ class TestPhoneAuth:
     @pytest.fixture
     def auth(self, tmp_path, monkeypatch):
         from engine.youtube.auth import YouTubeAuth
+        # load_config() BEFORE delenv, not after.
+        #
+        # load_config() calls _load_dotenv(), which copies .env back into
+        # os.environ - so clearing the variables first and loading second put
+        # them straight back. The test then passed only on a machine with no
+        # desktop OAuth client in .env, and started failing the day one was
+        # added. Config.secret() reads os.environ live, so clearing after the
+        # load is what actually isolates this.
+        cfg = load_config()
         monkeypatch.delenv("YOUTUBE_CLIENT_ID", raising=False)
         monkeypatch.delenv("YOUTUBE_CLIENT_SECRET", raising=False)
-        cfg = load_config()
         cfg.set("app.workspace", str(tmp_path))
         return YouTubeAuth(cfg)
 
